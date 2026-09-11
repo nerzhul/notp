@@ -1,0 +1,128 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0). Leave empty to use the latest pushed tag.'
+        required: false
+        default: ''
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY: notp
+  APP_ID: com.nerzhul.notp
+
+permissions:
+  contents: write
+
+jobs:
+  resolve-tag:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+      version: ${{ steps.t.outputs.version }}
+    steps:
+      - name: Determine tag
+        id: t
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: resolve-tag
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install system dependencies (GTK4)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-dev \
+            libgdk-pixbuf-2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libgraphene-1.0-dev \
+            libsoup-3.0-dev \
+            libadwaita-1-dev \
+            pkg-config \
+            build-essential
+
+      - name: Cache cargo registry & build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '.'
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage artifacts
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p release/${{ needs.resolve-tag.outputs.version }}
+          BIN="target/${{ matrix.target }}/release/${{ env.BINARY }}"
+          DEST="release/${{ needs.resolve-tag.outputs.version }}/${{ env.BINARY }}-${{ matrix.target }}"
+          cp "$BIN" "$DEST"
+          chmod +x "$DEST"
+          tar -C release/${{ needs.resolve-tag.outputs.version }} \
+            -czf release/${{ env.BINARY }}-${{ needs.resolve-tag.outputs.version }}-${{ matrix.target }}.tar.gz \
+            ${{ env.BINARY }}-${{ matrix.target }} ${{ env.BINARY }}.desktop
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: release/${{ env.BINARY }}-${{ needs.resolve-tag.outputs.version }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [resolve-tag, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -maxdepth 3 -type f -print
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
+          name: notp ${{ needs.resolve-tag.outputs.version }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(needs.resolve-tag.outputs.version, '-') }}
+          files: |
+            artifacts/**/*.tar.gz
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
