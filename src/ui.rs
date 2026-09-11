@@ -11,6 +11,9 @@ use gtk::{
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Instant;
+
+const AUTO_LOCK_SECONDS: u64 = 60;
 use uuid::Uuid;
 
 const APPLICATION_ID: &str = "com.nerzhul.notp";
@@ -830,12 +833,58 @@ fn show_main_window(application: &Application, vault: Vault) {
         glib::Propagation::Proceed
     });
 
-    let application_for_lock = application.clone();
-    let window_for_lock = window.clone();
-    let store_for_lock = vault.borrow().store().clone();
-    lock_button.connect_clicked(move |_| {
-        window_for_lock.set_visible(false);
-        show_unlock_window(&application_for_lock, store_for_lock.clone(), Some(window_for_lock.clone()));
+    let lock_action: Rc<dyn Fn()> = {
+        let application = application.clone();
+        let window = window.clone();
+        let store = vault.borrow().store().clone();
+        Rc::new(move || {
+            window.set_visible(false);
+            show_unlock_window(
+                &application,
+                store.clone(),
+                Some(window.clone()),
+            );
+        })
+    };
+
+    lock_button.connect_clicked({
+        let lock_action = lock_action.clone();
+        move |_| lock_action()
+    });
+
+    let has_been_active: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let last_inactive: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
+    let window_for_focus = window.clone();
+    let has_been_active_for_focus = has_been_active.clone();
+    let last_inactive_for_focus = last_inactive.clone();
+    window_for_focus.connect_is_active_notify(move |window| {
+        if window.is_active() {
+            has_been_active_for_focus.set(true);
+            last_inactive_for_focus.set(None);
+        } else if has_been_active_for_focus.get() {
+            last_inactive_for_focus.set(Some(Instant::now()));
+        }
+    });
+
+    let has_been_active_for_timer = has_been_active.clone();
+    let last_inactive_for_timer = last_inactive.clone();
+    let window_for_timer = window.clone();
+    let lock_action_for_timer = lock_action.clone();
+    glib::timeout_add_seconds_local(1, move || {
+        if has_been_active_for_timer.get() && !window_for_timer.is_active() {
+            let now = Instant::now();
+            let last = last_inactive_for_timer
+                .get()
+                .unwrap_or_else(|| {
+                    last_inactive_for_timer.set(Some(now));
+                    now
+                });
+            if now.duration_since(last).as_secs() >= AUTO_LOCK_SECONDS {
+                lock_action_for_timer();
+                return glib::ControlFlow::Break;
+            }
+        }
+        glib::ControlFlow::Continue
     });
 
     window.present();
