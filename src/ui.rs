@@ -1,10 +1,11 @@
 use crate::otp::{current_timestamp, generate_code, remaining_seconds, Algorithm};
+use crate::qr_import::OtpParams;
 use crate::storage::{Account, Vault, VaultStore};
 use gtk::prelude::*;
 use gtk::{
     Adjustment, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, ComboBoxText,
     Dialog, DialogFlags, Entry, Grid, HeaderBar, Label, ListBox, ListBoxRow, MessageDialog,
-    Orientation, Paned, ResponseType, ScrolledWindow, SelectionMode, SpinButton, Stack,
+    Orientation, Paned, ResponseType, ScrolledWindow, SelectionMode, SpinButton, Spinner, Stack,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -55,6 +56,10 @@ fn show_setup_window(application: &Application, store: VaultStore) {
         ],
     );
     dialog.set_default_size(440, 260);
+    if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
+        button.add_css_class("suggested-action");
+        dialog.set_default_widget(Some(&button));
+    }
 
     let content = GtkBox::new(Orientation::Vertical, 10);
     content.set_margin_start(20);
@@ -72,53 +77,111 @@ fn show_setup_window(application: &Application, store: VaultStore) {
     password.set_placeholder_text(Some("Master password (8 characters minimum)"));
     password.set_visibility(false);
     password.set_input_purpose(gtk::InputPurpose::Password);
+    password.set_activates_default(true);
     content.append(&password);
 
     let confirmation = Entry::new();
     confirmation.set_placeholder_text(Some("Confirm master password"));
     confirmation.set_visibility(false);
     confirmation.set_input_purpose(gtk::InputPurpose::Password);
+    confirmation.set_activates_default(true);
     content.append(&confirmation);
+    password.grab_focus();
 
     let error_label = Label::new(None);
     error_label.set_xalign(0.0);
     error_label.add_css_class("error");
     content.append(&error_label);
+
+    let spinner = Spinner::new();
+    spinner.set_halign(gtk::Align::Center);
+    spinner.set_margin_top(4);
+    spinner.set_visible(false);
+    content.append(&spinner);
+
     dialog.content_area().append(&content);
 
     let application_for_response = application.clone();
     let application_for_quit = application.clone();
     let application_for_close = application.clone();
+    let window_for_close = window.clone();
     let store_for_response = store.clone();
     dialog.connect_response(move |dialog, response| {
         if response == ResponseType::Accept {
-            let password_text = password.text();
-            let confirmation_text = confirmation.text();
+            let password_text = password.text().to_string();
+            let confirmation_text = confirmation.text().to_string();
             if password_text != confirmation_text {
                 error_label.set_text("Passwords do not match");
                 return;
             }
-            match store_for_response.create(&password_text) {
-                Ok(vault) => {
-                    dialog.destroy();
-                    window.destroy();
-                    show_main_window(&application_for_response, vault);
-                }
-                Err(error) => {
-                    error_label.set_text(&error.to_string());
-                }
+            password.set_sensitive(false);
+            confirmation.set_sensitive(false);
+            if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
+                button.set_sensitive(false);
             }
+            if let Some(button) = dialog.widget_for_response(ResponseType::Cancel) {
+                button.set_sensitive(false);
+            }
+            error_label.set_text("");
+            spinner.set_visible(true);
+            spinner.start();
+
+            let (sender, receiver) =
+                std::sync::mpsc::channel::<anyhow::Result<crate::storage::Vault>>();
+            let store = store_for_response.clone();
+            std::thread::spawn(move || {
+                let _ = sender.send(store.create(&password_text));
+            });
+
+            let dialog_for_poll = dialog.clone();
+            let window_for_poll = window.clone();
+            let application_for_poll = application_for_response.clone();
+            let password_for_poll = password.clone();
+            let confirmation_for_poll = confirmation.clone();
+            let error_label_for_poll = error_label.clone();
+            let spinner_for_poll = spinner.clone();
+
+            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                match receiver.try_recv() {
+                    Ok(Ok(vault)) => {
+                        dialog_for_poll.destroy();
+                        window_for_poll.destroy();
+                        show_main_window(&application_for_poll, vault);
+                        glib::ControlFlow::Break
+                    }
+                    Ok(Err(error)) => {
+                        spinner_for_poll.stop();
+                        spinner_for_poll.set_visible(false);
+                        password_for_poll.set_sensitive(true);
+                        confirmation_for_poll.set_sensitive(true);
+                        if let Some(button) =
+                            dialog_for_poll.widget_for_response(ResponseType::Accept)
+                        {
+                            button.set_sensitive(true);
+                        }
+                        if let Some(button) =
+                            dialog_for_poll.widget_for_response(ResponseType::Cancel)
+                        {
+                            button.set_sensitive(true);
+                        }
+                        error_label_for_poll.set_text(&error.to_string());
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(_) => glib::ControlFlow::Break,
+                }
+            });
         } else {
             application_for_quit.quit();
         }
     });
 
-    window.connect_close_request(move |_| {
+    window_for_close.connect_close_request(move |_| {
         application_for_close.quit();
         glib::Propagation::Proceed
     });
     dialog.present();
-    window.present();
+    window_for_close.present();
 }
 
 fn show_unlock_window(application: &Application, store: VaultStore) {
@@ -139,6 +202,10 @@ fn show_unlock_window(application: &Application, store: VaultStore) {
         ],
     );
     dialog.set_default_size(440, 190);
+    if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
+        button.add_css_class("suggested-action");
+        dialog.set_default_widget(Some(&button));
+    }
 
     let content = GtkBox::new(Orientation::Vertical, 10);
     content.set_margin_start(20);
@@ -154,44 +221,99 @@ fn show_unlock_window(application: &Application, store: VaultStore) {
     password.set_placeholder_text(Some("Master password"));
     password.set_visibility(false);
     password.set_input_purpose(gtk::InputPurpose::Password);
+    password.set_activates_default(true);
     content.append(&password);
+    password.grab_focus();
 
     let error_label = Label::new(None);
     error_label.set_xalign(0.0);
     error_label.add_css_class("error");
     content.append(&error_label);
+
+    let spinner = Spinner::new();
+    spinner.set_halign(gtk::Align::Center);
+    spinner.set_margin_top(4);
+    spinner.set_visible(false);
+    content.append(&spinner);
+
     dialog.content_area().append(&content);
 
     let application_for_response = application.clone();
     let application_for_quit = application.clone();
     let application_for_close = application.clone();
+    let window_for_close = window.clone();
     let store_for_response = store.clone();
     dialog.connect_response(move |dialog, response| {
         if response == ResponseType::Accept {
-            let password_text = password.text();
-            match store_for_response.unlock(&password_text) {
-                Ok(vault) => {
-                    dialog.destroy();
-                    window.destroy();
-                    show_main_window(&application_for_response, vault);
-                }
-                Err(_) => {
-                    password.set_text("");
-                    password.grab_focus();
-                    error_label.set_text("Incorrect password or corrupted vault");
-                }
+            let password_text = password.text().to_string();
+            password.set_sensitive(false);
+            if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
+                button.set_sensitive(false);
             }
+            if let Some(button) = dialog.widget_for_response(ResponseType::Cancel) {
+                button.set_sensitive(false);
+            }
+            error_label.set_text("");
+            spinner.set_visible(true);
+            spinner.start();
+
+            let (sender, receiver) =
+                std::sync::mpsc::channel::<anyhow::Result<crate::storage::Vault>>();
+            let store = store_for_response.clone();
+            std::thread::spawn(move || {
+                let _ = sender.send(store.unlock(&password_text));
+            });
+
+            let dialog_for_poll = dialog.clone();
+            let window_for_poll = window.clone();
+            let application_for_poll = application_for_response.clone();
+            let password_for_poll = password.clone();
+            let error_label_for_poll = error_label.clone();
+            let spinner_for_poll = spinner.clone();
+
+            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                match receiver.try_recv() {
+                    Ok(Ok(vault)) => {
+                        dialog_for_poll.destroy();
+                        window_for_poll.destroy();
+                        show_main_window(&application_for_poll, vault);
+                        glib::ControlFlow::Break
+                    }
+                    Ok(Err(_)) => {
+                        spinner_for_poll.stop();
+                        spinner_for_poll.set_visible(false);
+                        password_for_poll.set_sensitive(true);
+                        password_for_poll.set_text("");
+                        if let Some(button) =
+                            dialog_for_poll.widget_for_response(ResponseType::Accept)
+                        {
+                            button.set_sensitive(true);
+                        }
+                        if let Some(button) =
+                            dialog_for_poll.widget_for_response(ResponseType::Cancel)
+                        {
+                            button.set_sensitive(true);
+                        }
+                        password_for_poll.grab_focus();
+                        error_label_for_poll
+                            .set_text("Incorrect password or corrupted vault");
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(_) => glib::ControlFlow::Break,
+                }
+            });
         } else {
             application_for_quit.quit();
         }
     });
 
-    window.connect_close_request(move |_| {
+    window_for_close.connect_close_request(move |_| {
         application_for_close.quit();
         glib::Propagation::Proceed
     });
     dialog.present();
-    window.present();
+    window_for_close.present();
 }
 
 #[derive(Clone)]
@@ -227,8 +349,16 @@ fn show_main_window(application: &Application, vault: Vault) {
     let row_labels = Rc::new(RefCell::new(HashMap::new()));
 
     let header = HeaderBar::new();
+    let header_box = GtkBox::new(Orientation::Horizontal, 6);
+    header_box.set_margin_start(8);
+    header_box.set_margin_end(8);
     let add_button = Button::with_label("Add entry");
-    header.pack_start(&add_button);
+    let import_button = Button::with_label("Import QR");
+    let camera_button = Button::with_label("Scan with camera");
+    header_box.append(&add_button);
+    header_box.append(&import_button);
+    header_box.append(&camera_button);
+    header.pack_start(&header_box);
     window.set_titlebar(Some(&header));
 
     let list_scroller = ScrolledWindow::new();
@@ -333,7 +463,7 @@ fn show_main_window(application: &Application, vault: Vault) {
     add_button.connect_clicked(move |_| {
         let context_for_result = context_for_add.clone();
         let window_for_result = window_for_add.clone();
-        add_account_dialog(&window_for_add, move |account| {
+        add_account_dialog(&window_for_add, None, move |account| {
             let window_for_error = window_for_result.clone();
             let Some(account) = account else {
                 return;
@@ -373,6 +503,168 @@ fn show_main_window(application: &Application, vault: Vault) {
                 render_accounts(&context_for_result);
             }
         });
+    });
+
+    let window_for_import = window.clone();
+    let context_for_import = context.clone();
+    let window_for_camera = window.clone();
+    let context_for_camera = context.clone();
+    camera_button.connect_clicked(move |_| {
+        let (sender, receiver) =
+            std::sync::mpsc::channel::<anyhow::Result<crate::qr_import::OtpParams>>();
+        if let Err(error) = crate::camera::start_scan(move |result| {
+            let _ = sender.send(result);
+        }) {
+            show_error(&window_for_camera, "Camera unavailable", &error.to_string());
+            return;
+        }
+        let window_for_dialog = window_for_camera.clone();
+        let context_for_dialog = context_for_camera.clone();
+        glib::timeout_add_seconds_local(1, move || match receiver.try_recv() {
+            Ok(Ok(params)) => {
+                let window_for_callback = window_for_dialog.clone();
+                let context_for_callback = context_for_dialog.clone();
+                add_account_dialog(&window_for_dialog, Some(params), move |account| {
+                    let window_for_error = window_for_callback.clone();
+                    let Some(account) = account else {
+                        return;
+                    };
+                    let id = match context_for_callback
+                        .vault
+                        .borrow_mut()
+                        .data_mut()
+                        .add_account(account)
+                    {
+                        Ok(id) => id,
+                        Err(error) => {
+                            show_error(&window_for_error, "Invalid entry", &error.to_string());
+                            return;
+                        }
+                    };
+                    let save_result = context_for_callback.vault.borrow().save();
+                    let save_result = match save_result {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            context_for_callback
+                                .vault
+                                .borrow_mut()
+                                .data_mut()
+                                .remove_account(id);
+                            Err(error)
+                        }
+                    };
+                    if let Err(error) = save_result {
+                        show_error(
+                            &window_for_error,
+                            "Unable to save the vault",
+                            &error.to_string(),
+                        );
+                    } else {
+                        context_for_callback.selected.set(Some(id));
+                        render_accounts(&context_for_callback);
+                    }
+                });
+                glib::ControlFlow::Break
+            }
+            Ok(Err(error)) => {
+                show_error(&window_for_dialog, "Camera scan failed", &error.to_string());
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(_) => glib::ControlFlow::Break,
+        });
+    });
+    import_button.connect_clicked(move |_| {
+        let window_for_error = window_for_import.clone();
+        let chooser = gtk::FileChooserNative::new(
+            Some("Import a QR code"),
+            Some(&window_for_import),
+            gtk::FileChooserAction::Open,
+            Some("Open"),
+            Some("Cancel"),
+        );
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Images"));
+        filter.add_pixbuf_formats();
+        chooser.add_filter(&filter);
+        let window_for_dialog = window_for_import.clone();
+        let context_for_dialog = context_for_import.clone();
+        chooser.connect_response(move |chooser, response| {
+            if response == ResponseType::Accept {
+                if let Some(file) = chooser.file() {
+                    if let Some(path) = file.path() {
+                        match crate::qr_import::decode_qr_from_path(&path) {
+                            Ok(params) => {
+                                let context_for_result = context_for_dialog.clone();
+                                let window_for_result = window_for_dialog.clone();
+                                add_account_dialog(
+                                    &window_for_dialog,
+                                    Some(params),
+                                    move |account| {
+                                        let window_for_error = window_for_result.clone();
+                                        let Some(account) = account else {
+                                            return;
+                                        };
+                                        let id = match context_for_result
+                                            .vault
+                                            .borrow_mut()
+                                            .data_mut()
+                                            .add_account(account)
+                                        {
+                                            Ok(id) => id,
+                                            Err(error) => {
+                                                show_error(
+                                                    &window_for_error,
+                                                    "Invalid entry",
+                                                    &error.to_string(),
+                                                );
+                                                return;
+                                            }
+                                        };
+                                        let save_result = context_for_result.vault.borrow().save();
+                                        let save_result = match save_result {
+                                            Ok(()) => Ok(()),
+                                            Err(error) => {
+                                                context_for_result
+                                                    .vault
+                                                    .borrow_mut()
+                                                    .data_mut()
+                                                    .remove_account(id);
+                                                Err(error)
+                                            }
+                                        };
+                                        if let Err(error) = save_result {
+                                            show_error(
+                                                &window_for_error,
+                                                "Unable to save the vault",
+                                                &error.to_string(),
+                                            );
+                                        } else {
+                                            context_for_result.selected.set(Some(id));
+                                            render_accounts(&context_for_result);
+                                        }
+                                    },
+                                );
+                            }
+                            Err(error) => {
+                                show_error(
+                                    &window_for_error,
+                                    "Unable to import QR",
+                                    &error.to_string(),
+                                );
+                            }
+                        }
+                    } else {
+                        show_error(
+                            &window_for_error,
+                            "Unable to import QR",
+                            "Selected file has no local path",
+                        );
+                    }
+                }
+            }
+        });
+        chooser.show();
     });
 
     let context_for_copy = context.clone();
@@ -572,7 +864,7 @@ fn refresh_codes(context: &RenderContext) {
     }
 }
 
-fn add_account_dialog<F>(parent: &ApplicationWindow, on_result: F)
+fn add_account_dialog<F>(parent: &ApplicationWindow, prefill: Option<OtpParams>, on_result: F)
 where
     F: FnOnce(Option<Account>) + 'static,
 {
@@ -587,6 +879,10 @@ where
         ],
     );
     dialog.set_default_size(520, 360);
+    if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
+        button.add_css_class("suggested-action");
+        dialog.set_default_widget(Some(&button));
+    }
 
     let grid = Grid::new();
     grid.set_row_spacing(8);
@@ -601,6 +897,7 @@ where
     account_entry.set_placeholder_text(Some("user@example.com"));
     let secret_entry = Entry::new();
     secret_entry.set_placeholder_text(Some("Base32 secret"));
+    secret_entry.set_activates_default(true);
     let digits = ComboBoxText::new();
     digits.append(Some("6"), "6 digits");
     digits.append(Some("8"), "8 digits");
@@ -612,6 +909,22 @@ where
     algorithm.set_active(Some(0));
     let period_adjustment = Adjustment::new(30.0, 1.0, 3600.0, 1.0, 10.0, 0.0);
     let period = SpinButton::new(Some(&period_adjustment), 1.0, 0);
+
+    if let Some(prefill) = prefill.as_ref() {
+        issuer_entry.set_text(&prefill.issuer);
+        account_entry.set_text(&prefill.label);
+        secret_entry.set_text(&prefill.secret);
+        digits.set_active(Some(if prefill.digits == 8 { 1 } else { 0 }));
+        algorithm.set_active_id(Some(match prefill.algorithm {
+            Algorithm::Sha256 => "sha256",
+            Algorithm::Sha512 => "sha512",
+            _ => "sha1",
+        }));
+        period.set_value(prefill.period as f64);
+    }
+    issuer_entry.set_activates_default(true);
+    account_entry.set_activates_default(true);
+    secret_entry.set_activates_default(true);
 
     let mut row = 0;
     add_field(&grid, &Label::new(Some("Issuer")), &issuer_entry, row);
