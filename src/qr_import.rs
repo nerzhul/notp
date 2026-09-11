@@ -1,5 +1,7 @@
-use crate::otp::Algorithm;
-use anyhow::{bail, Context, Result};
+use crate::otp::{encode_base32, Algorithm};
+use anyhow::{anyhow, bail, Context, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use std::path::Path;
 
 pub struct OtpParams {
@@ -11,7 +13,7 @@ pub struct OtpParams {
     pub algorithm: Algorithm,
 }
 
-pub fn decode_qr_from_path<P: AsRef<Path>>(path: P) -> Result<OtpParams> {
+pub fn decode_qr_from_path<P: AsRef<Path>>(path: P) -> Result<Vec<OtpParams>> {
     #[allow(deprecated)]
     let image = image::open(path.as_ref()).context("Unable to read the image")?;
     #[allow(deprecated)]
@@ -23,11 +25,33 @@ pub fn decode_qr_from_path<P: AsRef<Path>>(path: P) -> Result<OtpParams> {
         .next()
         .context("No QR code detected in the image")?;
     let (_meta, payload) = grid.decode().context("Unable to read QR code contents")?;
-    parse_otpauth(&payload)
+    decode_qr_payload(&payload).with_context(|| {
+        let preview: String = payload.chars().take(80).collect();
+        if payload.len() > 80 {
+            format!(
+                "The QR code cannot be imported as an otpauth entry (read: {preview}\u{2026})"
+            )
+        } else {
+            format!("The QR code cannot be imported as an otpauth entry (read: {preview})")
+        }
+    })
+}
+
+pub fn decode_qr_payload(payload: &str) -> Result<Vec<OtpParams>> {
+    let url = url::Url::parse(payload).context("The QR code does not contain a valid URI")?;
+    match url.scheme() {
+        "otpauth" => Ok(vec![parse_otpauth(url.as_str())?]),
+        "otpauth-migration" => parse_migration(&url),
+        other => bail!("Unsupported URI scheme: {other}"),
+    }
 }
 
 pub fn parse_otpauth(uri: &str) -> Result<OtpParams> {
     let url = url::Url::parse(uri).context("Invalid otpauth URI")?;
+    parse_otpauth_url(&url)
+}
+
+fn parse_otpauth_url(url: &url::Url) -> Result<OtpParams> {
     if url.scheme() != "otpauth" {
         bail!("Unsupported URI scheme: expected otpauth");
     }
@@ -91,11 +115,264 @@ pub fn parse_otpauth(uri: &str) -> Result<OtpParams> {
     })
 }
 
+fn parse_migration(url: &url::Url) -> Result<Vec<OtpParams>> {
+    let host = url.host_str().unwrap_or("");
+    if !host.eq_ignore_ascii_case("offline") {
+        bail!(
+            "Unsupported otpauth-migration host: expected \"offline\", got {:?}",
+            host
+        );
+    }
+    let data = url
+        .query_pairs()
+        .find(|(name, _)| name == "data")
+        .map(|(_, value)| value.into_owned())
+        .context("Missing data parameter in otpauth-migration URI")?;
+    if data.is_empty() {
+        bail!("The data parameter in the otpauth-migration URI is empty");
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(data.as_bytes())
+        .context("Unable to base64-decode the otpauth-migration payload")?;
+    let payload = parse_migration_payload(&bytes)
+        .context("Unable to parse the otpauth-migration protobuf payload")?;
+    if payload.is_empty() {
+        bail!("The otpauth-migration payload contains no entries");
+    }
+    let mut entries = Vec::with_capacity(payload.len());
+    let mut skipped = 0_usize;
+    for parameter in payload {
+        match migration_parameter_to_params(parameter) {
+            Ok(entry) => entries.push(entry),
+            Err(MigrationSkip::UnsupportedType) => skipped += 1,
+            Err(MigrationSkip::Other(error)) => return Err(error),
+        }
+    }
+    if entries.is_empty() {
+        bail!(
+            "The otpauth-migration payload contains no supported TOTP entries ({} skipped)",
+            skipped
+        );
+    }
+    Ok(entries)
+}
+
+enum MigrationSkip {
+    UnsupportedType,
+    Other(anyhow::Error),
+}
+
+fn migration_parameter_to_params(parameter: MigrationOtpParameter) -> Result<OtpParams, MigrationSkip> {
+    if parameter.otp_type != 2 {
+        return Err(MigrationSkip::UnsupportedType);
+    }
+    if parameter.secret.is_empty() {
+        return Err(MigrationSkip::Other(anyhow!(
+            "An otpauth-migration entry is missing its secret"
+        )));
+    }
+    let (issuer, label) = split_migration_name(&parameter.issuer, &parameter.name);
+    let algorithm = match parameter.algorithm {
+        2 => Algorithm::Sha256,
+        3 => Algorithm::Sha512,
+        _ => Algorithm::Sha1,
+    };
+    let digits = if parameter.digits >= 6 && parameter.digits <= 8 {
+        parameter.digits as u8
+    } else {
+        6
+    };
+    Ok(OtpParams {
+        issuer,
+        label,
+        secret: encode_base32(&parameter.secret),
+        digits,
+        period: 30,
+        algorithm,
+    })
+}
+
+fn split_migration_name(issuer: &str, name: &str) -> (String, String) {
+    if let Some((label_issuer, account)) = name.split_once(':') {
+        let resolved_issuer = if issuer.is_empty() {
+            label_issuer.to_string()
+        } else {
+            issuer.to_string()
+        };
+        return (resolved_issuer, account.trim().to_string());
+    }
+    let resolved_issuer = if issuer.is_empty() {
+        "Imported".to_string()
+    } else {
+        issuer.to_string()
+    };
+    (resolved_issuer, name.trim().to_string())
+}
+
 fn decode_label(encoded: &str) -> String {
     percent_encoding::percent_decode_str(encoded)
         .decode_utf8()
         .map(|cow| cow.into_owned())
         .unwrap_or_else(|_| encoded.to_string())
+}
+
+struct MigrationOtpParameter {
+    secret: Vec<u8>,
+    name: String,
+    issuer: String,
+    algorithm: i32,
+    otp_type: i32,
+    digits: i32,
+}
+
+fn parse_migration_payload(data: &[u8]) -> Result<Vec<MigrationOtpParameter>> {
+    let mut pos = 0;
+    let mut parameters = Vec::new();
+    while pos < data.len() {
+        let tag = read_varint(data, &mut pos).context("Truncated migration payload")?;
+        let field = tag >> 3;
+        let wire_type = tag & 7;
+        if field == 2 && wire_type == 2 {
+            let length = read_varint(data, &mut pos).context("Truncated migration payload")? as usize;
+            if pos + length > data.len() {
+                bail!("Truncated migration payload");
+            }
+            let bytes = &data[pos..pos + length];
+            pos += length;
+            parameters.push(parse_migration_parameter(bytes)?);
+        } else {
+            skip_field(data, &mut pos, wire_type)?;
+        }
+    }
+    Ok(parameters)
+}
+
+fn parse_migration_parameter(data: &[u8]) -> Result<MigrationOtpParameter> {
+    let mut pos = 0;
+    let mut secret = Vec::new();
+    let mut name = String::new();
+    let mut issuer = String::new();
+    let mut algorithm: i32 = 1;
+    let mut otp_type: i32 = 2;
+    let mut digits: i32 = 6;
+    while pos < data.len() {
+        let tag = read_varint(data, &mut pos).context("Truncated migration entry")?;
+        let field = tag >> 3;
+        let wire_type = tag & 7;
+        match (field, wire_type) {
+            (1, 2) => {
+                let length =
+                    read_varint(data, &mut pos).context("Truncated migration entry")? as usize;
+                if pos + length > data.len() {
+                    bail!("Truncated migration entry");
+                }
+                secret = data[pos..pos + length].to_vec();
+                pos += length;
+            }
+            (2, 2) => {
+                let length =
+                    read_varint(data, &mut pos).context("Truncated migration entry")? as usize;
+                if pos + length > data.len() {
+                    bail!("Truncated migration entry");
+                }
+                name = String::from_utf8_lossy(&data[pos..pos + length]).into_owned();
+                pos += length;
+            }
+            (3, 2) => {
+                let length =
+                    read_varint(data, &mut pos).context("Truncated migration entry")? as usize;
+                if pos + length > data.len() {
+                    bail!("Truncated migration entry");
+                }
+                issuer = String::from_utf8_lossy(&data[pos..pos + length]).into_owned();
+                pos += length;
+            }
+            (4, 0) => algorithm = read_varint(data, &mut pos)? as i32,
+            (5, 0) => otp_type = read_varint(data, &mut pos)? as i32,
+            (7, 0) => digits = read_varint(data, &mut pos)? as i32,
+            (_, 0) => {
+                read_varint(data, &mut pos).context("Truncated migration entry")?;
+            }
+            (_, 2) => {
+                let length =
+                    read_varint(data, &mut pos).context("Truncated migration entry")? as usize;
+                if pos + length > data.len() {
+                    bail!("Truncated migration entry");
+                }
+                pos += length;
+            }
+            (_, 5) => {
+                if pos + 4 > data.len() {
+                    bail!("Truncated migration entry");
+                }
+                pos += 4;
+            }
+            (_, 1) => {
+                if pos + 8 > data.len() {
+                    bail!("Truncated migration entry");
+                }
+                pos += 8;
+            }
+            _ => bail!("Unsupported protobuf wire type in migration entry"),
+        }
+    }
+    Ok(MigrationOtpParameter {
+        secret,
+        name,
+        issuer,
+        algorithm,
+        otp_type,
+        digits,
+    })
+}
+
+fn read_varint(data: &[u8], pos: &mut usize) -> Result<u64> {
+    let mut result: u64 = 0;
+    let mut shift: u32 = 0;
+    loop {
+        if *pos >= data.len() {
+            bail!("Truncated varint");
+        }
+        if shift >= 64 {
+            bail!("Varint overflow");
+        }
+        let byte = data[*pos];
+        *pos += 1;
+        result |= (u64::from(byte) & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+    }
+}
+
+fn skip_field(data: &[u8], pos: &mut usize, wire_type: u64) -> Result<()> {
+    match wire_type {
+        0 => {
+            read_varint(data, pos)?;
+        }
+        1 => {
+            if *pos + 8 > data.len() {
+                bail!("Truncated payload");
+            }
+            *pos += 8;
+        }
+        2 => {
+            let length = read_varint(data, pos)? as usize;
+            if *pos + length > data.len() {
+                bail!("Truncated payload");
+            }
+            *pos += length;
+        }
+        5 => {
+            if *pos + 4 > data.len() {
+                bail!("Truncated payload");
+            }
+            *pos += 4;
+        }
+        _ => bail!("Unsupported protobuf wire type"),
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -118,5 +395,89 @@ mod tests {
     fn rejects_non_totp() {
         let uri = "otpauth://hotp/Example:alice?secret=JBSWY3DPEHPK3PXP&counter=0";
         assert!(parse_otpauth(uri).is_err());
+    }
+
+    #[test]
+    fn parses_migration_payload() {
+        let payload = build_migration_payload(&[
+            MigrationFixture {
+                secret: b"Hello!\xde\xad\xbe\xef".to_vec(),
+                name: "Example:alice@example.com",
+                issuer: "Example",
+                algorithm: 2,
+                otp_type: 2,
+                digits: 6,
+            },
+            MigrationFixture {
+                secret: b"other-secret".to_vec(),
+                name: "Foo:bar",
+                issuer: "",
+                algorithm: 1,
+                otp_type: 1,
+                digits: 6,
+            },
+        ]);
+        let encoded = URL_SAFE_NO_PAD.encode(payload);
+        let uri = format!("otpauth-migration://offline?data={encoded}");
+        let entries = decode_qr_payload(&uri).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].issuer, "Example");
+        assert_eq!(entries[0].label, "alice@example.com");
+        assert_eq!(entries[0].secret, encode_base32(b"Hello!\xde\xad\xbe\xef"));
+        assert_eq!(entries[0].algorithm, Algorithm::Sha256);
+        assert_eq!(entries[0].digits, 6);
+    }
+
+    struct MigrationFixture {
+        secret: Vec<u8>,
+        name: &'static str,
+        issuer: &'static str,
+        algorithm: i32,
+        otp_type: i32,
+        digits: i32,
+    }
+
+    fn build_migration_payload(entries: &[MigrationFixture]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for entry in entries {
+            let mut message = Vec::new();
+            write_bytes_field(&mut message, 1, &entry.secret);
+            write_string_field(&mut message, 2, entry.name.as_bytes());
+            write_string_field(&mut message, 3, entry.issuer.as_bytes());
+            write_varint_field(&mut message, 4, entry.algorithm as u64);
+            write_varint_field(&mut message, 5, entry.otp_type as u64);
+            write_varint_field(&mut message, 7, entry.digits as u64);
+            write_bytes_field(&mut out, 2, &message);
+        }
+        out
+    }
+
+    fn write_varint_field(out: &mut Vec<u8>, field: u32, value: u64) {
+        out.push(((field << 3) | 0) as u8);
+        write_varint(out, value);
+    }
+
+    fn write_bytes_field(out: &mut Vec<u8>, field: u32, value: &[u8]) {
+        out.push(((field << 3) | 2) as u8);
+        write_varint(out, value.len() as u64);
+        out.extend_from_slice(value);
+    }
+
+    fn write_string_field(out: &mut Vec<u8>, field: u32, value: &[u8]) {
+        write_bytes_field(out, field, value);
+    }
+
+    fn write_varint(out: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+                out.push(byte);
+            } else {
+                out.push(byte);
+                break;
+            }
+        }
     }
 }

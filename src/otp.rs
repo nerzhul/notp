@@ -100,6 +100,25 @@ pub fn normalize_secret(input: &str) -> Result<String> {
     Ok(normalized)
 }
 
+pub fn encode_base32(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut output = String::with_capacity(((input.len() + 4) / 5) * 8);
+    let mut buffer: u32 = 0;
+    let mut bits: u32 = 0;
+    for byte in input {
+        buffer = (buffer << 8) | u32::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            output.push(ALPHABET[((buffer >> bits) & 0x1f) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        output.push(ALPHABET[((buffer << (5 - bits)) & 0x1f) as usize] as char);
+    }
+    output
+}
+
 pub fn decode_base32(input: &str) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut buffer = 0_u32;

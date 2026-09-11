@@ -622,9 +622,10 @@ fn show_main_window(application: &Application, vault: Vault) {
                 if let Some(file) = chooser.file() {
                     if let Some(path) = file.path() {
                         match crate::qr_import::decode_qr_from_path(&path) {
-                            Ok(params) => {
+                            Ok(params) if params.len() == 1 => {
                                 let context_for_result = context_for_dialog.clone();
                                 let window_for_result = window_for_dialog.clone();
+                                let params = params.into_iter().next().unwrap();
                                 add_account_dialog(
                                     &window_for_dialog,
                                     Some(params),
@@ -671,6 +672,25 @@ fn show_main_window(application: &Application, vault: Vault) {
                                             context_for_result.selected.set(Some(id));
                                             render_accounts(&context_for_result);
                                         }
+                                    },
+                                );
+                            }
+                            Ok(params) => {
+                                let context_for_result = context_for_dialog.clone();
+                                let window_for_result = window_for_dialog.clone();
+                                let count = params.len();
+                                confirm(
+                                    &window_for_dialog,
+                                    "Confirm bulk import",
+                                    &format!(
+                                        "This QR code contains {count} entries. Import them all?"
+                                    ),
+                                    move || {
+                                        import_entries(
+                                            &window_for_result,
+                                            &context_for_result,
+                                            params,
+                                        );
                                     },
                                 );
                             }
@@ -1025,14 +1045,70 @@ where
     });
 }
 
+fn import_entries(
+    parent: &ApplicationWindow,
+    context: &RenderContext,
+    entries: Vec<crate::qr_import::OtpParams>,
+) {
+    let mut accounts = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match crate::storage::Account::new(
+            entry.issuer,
+            entry.label,
+            entry.secret,
+            entry.digits,
+            entry.period,
+            entry.algorithm,
+        ) {
+            Ok(account) => accounts.push(account),
+            Err(error) => {
+                show_error(parent, "Invalid entry", &error.to_string());
+                return;
+            }
+        }
+    }
+    let mut last_id: Option<Uuid> = None;
+    {
+        let mut vault = context.vault.borrow_mut();
+        let data = vault.data_mut();
+        for account in accounts {
+            match data.add_account(account) {
+                Ok(id) => last_id = Some(id),
+                Err(error) => {
+                    show_error(parent, "Invalid entry", &error.to_string());
+                    return;
+                }
+            }
+        }
+    }
+    if let Err(error) = context.vault.borrow().save() {
+        show_error(parent, "Unable to save the vault", &error.to_string());
+        return;
+    }
+    if let Some(id) = last_id {
+        context.selected.set(Some(id));
+    }
+    render_accounts(context);
+}
+
 fn show_error(parent: &ApplicationWindow, title: &str, message: &str) {
+    const COPY_RESPONSE: i32 = 100;
     let dialog = MessageDialog::builder()
         .buttons(ButtonsType::Ok)
-        .text(message)
-        .secondary_text(title)
+        .text(title)
+        .secondary_text(message)
         .build();
+    dialog.add_button("Copy", ResponseType::__Unknown(COPY_RESPONSE));
+    dialog.set_default_response(ResponseType::Ok);
     dialog.set_transient_for(Some(parent));
-    dialog.run_async(|dialog, _| dialog.close());
+    let parent = parent.clone();
+    let message = message.to_string();
+    dialog.run_async(move |dialog, response| {
+        if response == ResponseType::__Unknown(COPY_RESPONSE) {
+            copy_to_clipboard(&parent, &message);
+        }
+        dialog.close();
+    });
 }
 
 fn show_application_error(application: &Application, title: &str, message: &str) {
@@ -1058,7 +1134,45 @@ fn show_application_error(application: &Application, title: &str, message: &str)
 }
 
 fn copy_to_clipboard(window: &ApplicationWindow, text: &str) {
+    let owned = text.to_owned();
+    if copy_via_gdk(window, &owned).is_ok() {
+        return;
+    }
+    let candidates = clipboard_command_candidates();
+    for (command, args) in candidates {
+        if let Ok(mut child) = std::process::Command::new(command)
+            .args(args.iter().copied())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                if stdin.write_all(owned.as_bytes()).is_ok() {
+                    let _ = child.wait();
+                    return;
+                }
+            }
+            let _ = child.kill();
+        }
+    }
+}
+
+fn copy_via_gdk(window: &ApplicationWindow, text: &str) -> std::result::Result<(), ()> {
+    use gdk4::prelude::DisplayExt;
     let display = gtk::prelude::RootExt::display(window);
-    let clipboard = gdk4::Display::clipboard(&display);
+    let clipboard = display.clipboard();
     clipboard.set_text(text);
+    Ok(())
+}
+
+fn clipboard_command_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
+    let mut candidates = Vec::new();
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
+    {
+        candidates.push(("wl-copy", Vec::new()));
+    }
+    candidates.push(("xclip", vec!["-selection", "clipboard"]));
+    candidates.push(("xsel", vec!["--clipboard", "--input"]));
+    candidates
 }
