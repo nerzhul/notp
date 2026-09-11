@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=notp
+GenericName=OTP Authenticator
+Comment=Generate Time-based One-Time Passwords (TOTP) for two-factor authentication
+Exec=notp %u
+Icon=notp
+Terminal=false
+Categories=Utility;Security;
+StartupNotify=true
+StartupWMClass=notp
+MimeType=x-scheme-handler/otpauth;
+Keywords=otp;totp;authenticator;2fa;security;
