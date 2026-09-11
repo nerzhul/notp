@@ -30,7 +30,7 @@ pub fn run() {
             }
         };
         if store.exists() {
-            show_unlock_window(app, store);
+            show_unlock_window(app, store, None);
         } else {
             show_setup_window(app, store);
         }
@@ -199,7 +199,7 @@ fn show_setup_window(application: &Application, store: VaultStore) {
     window_for_close.present();
 }
 
-fn show_unlock_window(application: &Application, store: VaultStore) {
+fn show_unlock_window(application: &Application, store: VaultStore, window_to_destroy: Option<ApplicationWindow>) {
     let window = ApplicationWindow::builder()
         .application(application)
         .title("Notp — Unlock")
@@ -308,11 +308,15 @@ fn show_unlock_window(application: &Application, store: VaultStore) {
             let error_label_for_poll = error_label.clone();
             let spinner_for_poll = spinner.clone();
 
+            let window_to_destroy_for_poll = window_to_destroy.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
                 match receiver.try_recv() {
                     Ok(Ok(vault)) => {
                         dialog_for_poll.destroy();
                         window_for_poll.destroy();
+                        if let Some(w) = window_to_destroy_for_poll.as_ref() {
+                            w.destroy();
+                        }
                         show_main_window(&application_for_poll, vault);
                         glib::ControlFlow::Break
                     }
@@ -830,8 +834,8 @@ fn show_main_window(application: &Application, vault: Vault) {
     let window_for_lock = window.clone();
     let store_for_lock = vault.borrow().store().clone();
     lock_button.connect_clicked(move |_| {
-        window_for_lock.destroy();
-        show_unlock_window(&application_for_lock, store_for_lock.clone());
+        window_for_lock.set_visible(false);
+        show_unlock_window(&application_for_lock, store_for_lock.clone(), Some(window_for_lock.clone()));
     });
 
     window.present();
