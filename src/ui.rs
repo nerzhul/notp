@@ -4,8 +4,9 @@ use crate::storage::{Account, Vault, VaultStore};
 use gtk::prelude::*;
 use gtk::{
     Adjustment, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, ComboBoxText,
-    Dialog, DialogFlags, Entry, Grid, HeaderBar, Label, ListBox, ListBoxRow, MessageDialog,
-    Orientation, Paned, ResponseType, ScrolledWindow, SelectionMode, SpinButton, Spinner, Stack,
+    Dialog, DialogFlags, Entry, Grid, HeaderBar, Label, ListBox, ListBoxRow, MenuButton,
+    MessageDialog, Orientation, Paned, Popover, ResponseType, ScrolledWindow, SelectionMode,
+    SpinButton, Spinner, Stack,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -381,23 +382,46 @@ fn show_main_window(application: &Application, vault: Vault) {
     header_box.set_margin_start(8);
     header_box.set_margin_end(8);
     let add_button = Button::with_label("Add entry");
-    let import_button = Button::with_label("Import QR");
-    let camera_button = Button::with_label("Scan with camera");
+
+    let import_popover = Popover::new();
+    let import_options = GtkBox::new(Orientation::Vertical, 0);
+    import_options.set_margin_top(4);
+    import_options.set_margin_bottom(4);
+    import_options.set_margin_start(4);
+    import_options.set_margin_end(4);
+    let import_image_option = Button::with_label("Import from image\u{2026}");
+    import_image_option.set_has_frame(false);
+    import_image_option.set_halign(gtk::Align::Fill);
+    let import_camera_option = Button::with_label("Scan with camera\u{2026}");
+    import_camera_option.set_has_frame(false);
+    import_camera_option.set_halign(gtk::Align::Fill);
+    import_options.append(&import_image_option);
+    import_options.append(&import_camera_option);
+    import_popover.set_child(Some(&import_options));
+
+    let import_menu_button = MenuButton::new();
+    import_menu_button.set_icon_name("document-open-symbolic");
+    import_menu_button.set_popover(Some(&import_popover));
+    import_menu_button.set_tooltip_text(Some("Import an entry from an image or camera"));
+    import_menu_button.set_valign(gtk::Align::Center);
+
     header_box.append(&add_button);
-    header_box.append(&import_button);
-    header_box.append(&camera_button);
+    header_box.append(&import_menu_button);
     header.pack_start(&header_box);
     window.set_titlebar(Some(&header));
 
     let list_scroller = ScrolledWindow::new();
     list_scroller.set_min_content_width(280);
     list_scroller.set_hexpand(true);
+    list_scroller.set_vexpand(true);
     let list_box = ListBox::new();
     list_box.set_selection_mode(SelectionMode::Single);
     list_box.set_activate_on_single_click(false);
     list_scroller.set_child(Some(&list_box));
 
     let detail_stack = Stack::new();
+    detail_stack.set_hexpand(true);
+    detail_stack.set_vexpand(true);
     let empty_state = GtkBox::new(Orientation::Vertical, 12);
     empty_state.set_valign(gtk::Align::Center);
     empty_state.set_halign(gtk::Align::Center);
@@ -442,6 +466,11 @@ fn show_main_window(application: &Application, vault: Vault) {
     detail_stack.set_visible_child_name("empty");
 
     let paned = Paned::new(Orientation::Horizontal);
+    paned.set_vexpand(true);
+    paned.set_resize_start_child(true);
+    paned.set_shrink_start_child(false);
+    paned.set_resize_end_child(true);
+    paned.set_shrink_end_child(false);
     paned.set_start_child(Some(&list_scroller));
     paned.set_end_child(Some(&detail_stack));
     paned.set_position(300);
@@ -537,7 +566,9 @@ fn show_main_window(application: &Application, vault: Vault) {
     let context_for_import = context.clone();
     let window_for_camera = window.clone();
     let context_for_camera = context.clone();
-    camera_button.connect_clicked(move |_| {
+    let popover_for_camera = import_popover.clone();
+    import_camera_option.connect_clicked(move |_| {
+        popover_for_camera.popdown();
         let (sender, receiver) =
             std::sync::mpsc::channel::<anyhow::Result<crate::qr_import::OtpParams>>();
         if let Err(error) = crate::camera::start_scan(move |result| {
@@ -602,7 +633,9 @@ fn show_main_window(application: &Application, vault: Vault) {
             Err(_) => glib::ControlFlow::Break,
         });
     });
-    import_button.connect_clicked(move |_| {
+    let popover_for_import = import_popover.clone();
+    import_image_option.connect_clicked(move |_| {
+        popover_for_import.popdown();
         let window_for_error = window_for_import.clone();
         let chooser = gtk::FileChooserNative::new(
             Some("Import a QR code"),
@@ -1098,17 +1131,21 @@ fn show_error(parent: &ApplicationWindow, title: &str, message: &str) {
         .text(title)
         .secondary_text(message)
         .build();
-    dialog.add_button("Copy", ResponseType::__Unknown(COPY_RESPONSE));
+    let copy_button: Button = dialog
+        .add_button("Copy", ResponseType::__Unknown(COPY_RESPONSE))
+        .downcast()
+        .expect("Copy button must be a Button widget");
     dialog.set_default_response(ResponseType::Ok);
     dialog.set_transient_for(Some(parent));
     let parent = parent.clone();
     let message = message.to_string();
-    dialog.run_async(move |dialog, response| {
-        if response == ResponseType::__Unknown(COPY_RESPONSE) {
-            copy_to_clipboard(&parent, &message);
-        }
+    copy_button.connect_clicked(move |_| {
+        copy_to_clipboard(&parent, &message);
+    });
+    dialog.connect_response(move |dialog, _| {
         dialog.close();
     });
+    dialog.present();
 }
 
 fn show_application_error(application: &Application, title: &str, message: &str) {
