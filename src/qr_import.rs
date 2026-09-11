@@ -178,10 +178,9 @@ fn migration_parameter_to_params(parameter: MigrationOtpParameter) -> Result<Otp
         3 => Algorithm::Sha512,
         _ => Algorithm::Sha1,
     };
-    let digits = if parameter.digits >= 6 && parameter.digits <= 8 {
-        parameter.digits as u8
-    } else {
-        6
+    let digits = match parameter.digits {
+        2 => 8_u8,
+        _ => 6_u8,
     };
     Ok(OtpParams {
         issuer,
@@ -233,7 +232,7 @@ fn parse_migration_payload(data: &[u8]) -> Result<Vec<MigrationOtpParameter>> {
         let tag = read_varint(data, &mut pos).context("Truncated migration payload")?;
         let field = tag >> 3;
         let wire_type = tag & 7;
-        if field == 2 && wire_type == 2 {
+        if field == 1 && wire_type == 2 {
             let length = read_varint(data, &mut pos).context("Truncated migration payload")? as usize;
             if pos + length > data.len() {
                 bail!("Truncated migration payload");
@@ -289,8 +288,8 @@ fn parse_migration_parameter(data: &[u8]) -> Result<MigrationOtpParameter> {
                 pos += length;
             }
             (4, 0) => algorithm = read_varint(data, &mut pos)? as i32,
-            (5, 0) => otp_type = read_varint(data, &mut pos)? as i32,
-            (7, 0) => digits = read_varint(data, &mut pos)? as i32,
+            (5, 0) => digits = read_varint(data, &mut pos)? as i32,
+            (6, 0) => otp_type = read_varint(data, &mut pos)? as i32,
             (_, 0) => {
                 read_varint(data, &mut pos).context("Truncated migration entry")?;
             }
@@ -407,7 +406,7 @@ mod tests {
                 issuer: "Example",
                 algorithm: 2,
                 otp_type: 2,
-                digits: 6,
+                digits: 1,
             },
             MigrationFixture {
                 secret: b"other-secret".to_vec(),
@@ -415,7 +414,7 @@ mod tests {
                 issuer: "",
                 algorithm: 1,
                 otp_type: 1,
-                digits: 6,
+                digits: 2,
             },
         ]);
         let encoded = URL_SAFE_NO_PAD.encode(payload);
@@ -446,9 +445,9 @@ mod tests {
             write_string_field(&mut message, 2, entry.name.as_bytes());
             write_string_field(&mut message, 3, entry.issuer.as_bytes());
             write_varint_field(&mut message, 4, entry.algorithm as u64);
-            write_varint_field(&mut message, 5, entry.otp_type as u64);
-            write_varint_field(&mut message, 7, entry.digits as u64);
-            write_bytes_field(&mut out, 2, &message);
+            write_varint_field(&mut message, 5, entry.digits as u64);
+            write_varint_field(&mut message, 6, entry.otp_type as u64);
+            write_bytes_field(&mut out, 1, &message);
         }
         out
     }
