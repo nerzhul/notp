@@ -405,8 +405,13 @@ fn show_main_window(application: &Application, vault: Vault) {
     import_menu_button.set_tooltip_text(Some("Import an entry from an image or camera"));
     import_menu_button.set_valign(gtk::Align::Center);
 
+    let lock_button = Button::from_icon_name("system-lock-screen-symbolic");
+    lock_button.set_tooltip_text(Some("Lock the vault"));
+    lock_button.set_valign(gtk::Align::Center);
+
     header_box.append(&add_button);
     header_box.append(&import_menu_button);
+    header_box.append(&lock_button);
     header.pack_start(&header_box);
     window.set_titlebar(Some(&header));
 
@@ -815,10 +820,20 @@ fn show_main_window(application: &Application, vault: Vault) {
     });
 
     let application = application.clone();
+    let application_for_close = application.clone();
     window.connect_close_request(move |_| {
-        application.quit();
+        application_for_close.quit();
         glib::Propagation::Proceed
     });
+
+    let application_for_lock = application.clone();
+    let window_for_lock = window.clone();
+    let store_for_lock = vault.borrow().store().clone();
+    lock_button.connect_clicked(move |_| {
+        window_for_lock.destroy();
+        show_unlock_window(&application_for_lock, store_for_lock.clone());
+    });
+
     window.present();
 }
 

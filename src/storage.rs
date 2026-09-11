@@ -153,6 +153,11 @@ impl Vault {
         &mut self.data
     }
 
+    #[cfg(feature = "gtk")]
+    pub fn store(&self) -> &VaultStore {
+        &self.store
+    }
+
     pub fn save(&self) -> Result<()> {
         self.data.validate()?;
         let mut plaintext =
