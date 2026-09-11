@@ -46,20 +46,12 @@ fn show_setup_window(application: &Application, store: VaultStore) {
         .default_height(300)
         .build();
 
-    let dialog = Dialog::with_buttons(
-        Some("Create vault"),
-        Some(&window),
-        DialogFlags::MODAL,
-        &[
-            ("Cancel", ResponseType::Cancel),
-            ("Create", ResponseType::Accept),
-        ],
-    );
+    let dialog = Dialog::new();
+    dialog.set_title(Some("Create vault"));
+    dialog.set_transient_for(Some(&window));
+    dialog.set_modal(true);
     dialog.set_default_size(440, 260);
-    if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
-        button.add_css_class("suggested-action");
-        dialog.set_default_widget(Some(&button));
-    }
+    dialog.set_resizable(false);
 
     let content = GtkBox::new(Orientation::Vertical, 10);
     content.set_margin_start(20);
@@ -99,7 +91,39 @@ fn show_setup_window(application: &Application, store: VaultStore) {
     spinner.set_visible(false);
     content.append(&spinner);
 
+    let action_row = GtkBox::new(Orientation::Horizontal, 8);
+    action_row.set_halign(gtk::Align::End);
+    action_row.set_margin_top(12);
+    action_row.set_margin_bottom(4);
+    let cancel_button = Button::with_label("Cancel");
+    let create_button = Button::with_label("Create");
+    create_button.add_css_class("suggested-action");
+    dialog.set_default_widget(Some(&create_button));
+    action_row.append(&cancel_button);
+    action_row.append(&create_button);
+    content.append(&action_row);
+
     dialog.content_area().append(&content);
+
+    let dialog_for_cancel = dialog.clone();
+    cancel_button.connect_clicked(move |_| {
+        dialog_for_cancel.response(ResponseType::Cancel);
+    });
+    let dialog_for_create = dialog.clone();
+    create_button.connect_clicked(move |_| {
+        dialog_for_create.response(ResponseType::Accept);
+    });
+    let dialog_for_escape = dialog.clone();
+    let escape_controller = gtk::EventControllerKey::new();
+    escape_controller.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape {
+            dialog_for_escape.response(ResponseType::Cancel);
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    dialog.add_controller(escape_controller);
 
     let application_for_response = application.clone();
     let application_for_quit = application.clone();
@@ -116,12 +140,8 @@ fn show_setup_window(application: &Application, store: VaultStore) {
             }
             password.set_sensitive(false);
             confirmation.set_sensitive(false);
-            if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
-                button.set_sensitive(false);
-            }
-            if let Some(button) = dialog.widget_for_response(ResponseType::Cancel) {
-                button.set_sensitive(false);
-            }
+            cancel_button.set_sensitive(false);
+            create_button.set_sensitive(false);
             error_label.set_text("");
             spinner.set_visible(true);
             spinner.start();
@@ -138,6 +158,8 @@ fn show_setup_window(application: &Application, store: VaultStore) {
             let application_for_poll = application_for_response.clone();
             let password_for_poll = password.clone();
             let confirmation_for_poll = confirmation.clone();
+            let cancel_button_for_poll = cancel_button.clone();
+            let create_button_for_poll = create_button.clone();
             let error_label_for_poll = error_label.clone();
             let spinner_for_poll = spinner.clone();
 
@@ -154,16 +176,8 @@ fn show_setup_window(application: &Application, store: VaultStore) {
                         spinner_for_poll.set_visible(false);
                         password_for_poll.set_sensitive(true);
                         confirmation_for_poll.set_sensitive(true);
-                        if let Some(button) =
-                            dialog_for_poll.widget_for_response(ResponseType::Accept)
-                        {
-                            button.set_sensitive(true);
-                        }
-                        if let Some(button) =
-                            dialog_for_poll.widget_for_response(ResponseType::Cancel)
-                        {
-                            button.set_sensitive(true);
-                        }
+                        cancel_button_for_poll.set_sensitive(true);
+                        create_button_for_poll.set_sensitive(true);
                         error_label_for_poll.set_text(&error.to_string());
                         glib::ControlFlow::Break
                     }
@@ -192,20 +206,12 @@ fn show_unlock_window(application: &Application, store: VaultStore) {
         .default_height(240)
         .build();
 
-    let dialog = Dialog::with_buttons(
-        Some("Unlock Notp"),
-        Some(&window),
-        DialogFlags::MODAL,
-        &[
-            ("Cancel", ResponseType::Cancel),
-            ("Unlock", ResponseType::Accept),
-        ],
-    );
+    let dialog = Dialog::new();
+    dialog.set_title(Some("Unlock Notp"));
+    dialog.set_transient_for(Some(&window));
+    dialog.set_modal(true);
     dialog.set_default_size(440, 190);
-    if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
-        button.add_css_class("suggested-action");
-        dialog.set_default_widget(Some(&button));
-    }
+    dialog.set_resizable(false);
 
     let content = GtkBox::new(Orientation::Vertical, 10);
     content.set_margin_start(20);
@@ -236,7 +242,39 @@ fn show_unlock_window(application: &Application, store: VaultStore) {
     spinner.set_visible(false);
     content.append(&spinner);
 
+    let action_row = GtkBox::new(Orientation::Horizontal, 8);
+    action_row.set_halign(gtk::Align::End);
+    action_row.set_margin_top(12);
+    action_row.set_margin_bottom(4);
+    let cancel_button = Button::with_label("Cancel");
+    let unlock_button = Button::with_label("Unlock");
+    unlock_button.add_css_class("suggested-action");
+    dialog.set_default_widget(Some(&unlock_button));
+    action_row.append(&cancel_button);
+    action_row.append(&unlock_button);
+    content.append(&action_row);
+
     dialog.content_area().append(&content);
+
+    let dialog_for_cancel = dialog.clone();
+    cancel_button.connect_clicked(move |_| {
+        dialog_for_cancel.response(ResponseType::Cancel);
+    });
+    let dialog_for_unlock = dialog.clone();
+    unlock_button.connect_clicked(move |_| {
+        dialog_for_unlock.response(ResponseType::Accept);
+    });
+    let dialog_for_escape = dialog.clone();
+    let escape_controller = gtk::EventControllerKey::new();
+    escape_controller.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape {
+            dialog_for_escape.response(ResponseType::Cancel);
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    dialog.add_controller(escape_controller);
 
     let application_for_response = application.clone();
     let application_for_quit = application.clone();
@@ -247,12 +285,8 @@ fn show_unlock_window(application: &Application, store: VaultStore) {
         if response == ResponseType::Accept {
             let password_text = password.text().to_string();
             password.set_sensitive(false);
-            if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
-                button.set_sensitive(false);
-            }
-            if let Some(button) = dialog.widget_for_response(ResponseType::Cancel) {
-                button.set_sensitive(false);
-            }
+            cancel_button.set_sensitive(false);
+            unlock_button.set_sensitive(false);
             error_label.set_text("");
             spinner.set_visible(true);
             spinner.start();
@@ -268,6 +302,8 @@ fn show_unlock_window(application: &Application, store: VaultStore) {
             let window_for_poll = window.clone();
             let application_for_poll = application_for_response.clone();
             let password_for_poll = password.clone();
+            let cancel_button_for_poll = cancel_button.clone();
+            let unlock_button_for_poll = unlock_button.clone();
             let error_label_for_poll = error_label.clone();
             let spinner_for_poll = spinner.clone();
 
@@ -283,17 +319,9 @@ fn show_unlock_window(application: &Application, store: VaultStore) {
                         spinner_for_poll.stop();
                         spinner_for_poll.set_visible(false);
                         password_for_poll.set_sensitive(true);
+                        cancel_button_for_poll.set_sensitive(true);
+                        unlock_button_for_poll.set_sensitive(true);
                         password_for_poll.set_text("");
-                        if let Some(button) =
-                            dialog_for_poll.widget_for_response(ResponseType::Accept)
-                        {
-                            button.set_sensitive(true);
-                        }
-                        if let Some(button) =
-                            dialog_for_poll.widget_for_response(ResponseType::Cancel)
-                        {
-                            button.set_sensitive(true);
-                        }
                         password_for_poll.grab_focus();
                         error_label_for_poll
                             .set_text("Incorrect password or corrupted vault");
