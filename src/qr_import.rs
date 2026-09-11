@@ -25,15 +25,16 @@ pub fn decode_qr_from_path<P: AsRef<Path>>(path: P) -> Result<Vec<OtpParams>> {
         .next()
         .context("No QR code detected in the image")?;
     let (_meta, payload) = grid.decode().context("Unable to read QR code contents")?;
-    decode_qr_payload(&payload).with_context(|| {
-        let preview: String = payload.chars().take(80).collect();
-        if payload.len() > 80 {
-            format!(
-                "The QR code cannot be imported as an otpauth entry (read: {preview}\u{2026})"
-            )
+    decode_qr_payload(&payload).map_err(|err| {
+        let preview: String = payload.chars().take(120).collect();
+        let ellipsis = if payload.chars().count() > preview.chars().count() {
+            "\u{2026}"
         } else {
-            format!("The QR code cannot be imported as an otpauth entry (read: {preview})")
-        }
+            ""
+        };
+        anyhow::Error::msg(format!(
+            "The QR code cannot be imported as an otpauth entry (read: {preview}{ellipsis}): {err:#}"
+        ))
     })
 }
 
