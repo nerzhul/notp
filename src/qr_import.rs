@@ -1,6 +1,6 @@
 use crate::otp::{encode_base32, Algorithm};
 use anyhow::{anyhow, bail, Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use std::path::Path;
 
@@ -132,9 +132,7 @@ fn parse_migration(url: &url::Url) -> Result<Vec<OtpParams>> {
     if data.is_empty() {
         bail!("The data parameter in the otpauth-migration URI is empty");
     }
-    let bytes = URL_SAFE_NO_PAD
-        .decode(data.as_bytes())
-        .context("Unable to base64-decode the otpauth-migration payload")?;
+    let bytes = decode_migration_data(&data).context("Unable to base64-decode the otpauth-migration payload")?;
     let payload = parse_migration_payload(&bytes)
         .context("Unable to parse the otpauth-migration protobuf payload")?;
     if payload.is_empty() {
@@ -214,6 +212,27 @@ fn decode_label(encoded: &str) -> String {
         .decode_utf8()
         .map(|cow| cow.into_owned())
         .unwrap_or_else(|_| encoded.to_string())
+}
+
+fn decode_migration_data(data: &str) -> Result<Vec<u8>> {
+    let trimmed = data.trim().trim_end_matches('=');
+    let candidates: [base64::engine::GeneralPurpose; 4] = [
+        URL_SAFE_NO_PAD,
+        URL_SAFE,
+        STANDARD_NO_PAD,
+        STANDARD,
+    ];
+    let mut last_err: Option<base64::DecodeError> = None;
+    for engine in &candidates {
+        match engine.decode(trimmed.as_bytes()) {
+            Ok(bytes) => return Ok(bytes),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    match last_err {
+        Some(err) => Err(anyhow!(err)),
+        None => bail!("Empty base64 data"),
+    }
 }
 
 struct MigrationOtpParameter {
@@ -426,6 +445,41 @@ mod tests {
         assert_eq!(entries[0].secret, encode_base32(b"Hello!\xde\xad\xbe\xef"));
         assert_eq!(entries[0].algorithm, Algorithm::Sha256);
         assert_eq!(entries[0].digits, 6);
+    }
+
+    #[test]
+    fn parses_migration_payload_with_standard_base64_padding() {
+        let payload = build_migration_payload(&[MigrationFixture {
+            secret: b"hello-secret".to_vec(),
+            name: "Example:alice@example.com",
+            issuer: "Example",
+            algorithm: 1,
+            otp_type: 2,
+            digits: 1,
+        }]);
+        let encoded = STANDARD.encode(payload);
+        let uri = format!("otpauth-migration://offline?data={encoded}");
+        let entries = decode_qr_payload(&uri).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].issuer, "Example");
+        assert_eq!(entries[0].secret, encode_base32(b"hello-secret"));
+    }
+
+    #[test]
+    fn parses_migration_payload_with_url_safe_padded_base64() {
+        let payload = build_migration_payload(&[MigrationFixture {
+            secret: b"another-secret".to_vec(),
+            name: "Issuer:user",
+            issuer: "Issuer",
+            algorithm: 1,
+            otp_type: 2,
+            digits: 1,
+        }]);
+        let encoded = URL_SAFE.encode(payload);
+        let uri = format!("otpauth-migration://offline?data={encoded}");
+        let entries = decode_qr_payload(&uri).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].label, "user");
     }
 
     struct MigrationFixture {
