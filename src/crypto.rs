@@ -220,4 +220,110 @@ mod tests {
         let result = open_with_key_and_salt(&encoded, "password");
         assert!(result.is_err());
     }
+
+    fn encode_raw(
+        plaintext: &[u8],
+        kdf: KdfParams,
+        salt: [u8; SALT_LENGTH],
+        nonce: [u8; NONCE_LENGTH],
+    ) -> Vec<u8> {
+        // Derive a real key using production-grade Argon2 params so the bytes
+        // are well-formed, then splice an out-of-range KdfParams into the
+        // serialized envelope so we exercise decode_file()'s clamp check.
+        let production = KdfParams::production();
+        let mut key = [0_u8; KEY_LENGTH];
+        let argon = production.argon2().unwrap();
+        argon
+            .hash_password_into(b"password", &salt, &mut key)
+            .unwrap();
+        let ciphertext = encrypt_with_key(plaintext, &key, &kdf, &salt, &nonce).unwrap();
+        key.zeroize();
+        let file = EncryptedFile {
+            kdf,
+            salt,
+            nonce,
+            ciphertext,
+        };
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(MAGIC);
+        encoded.push(FILE_VERSION);
+        encoded.extend_from_slice(&bincode::serialize(&file).unwrap());
+        encoded
+    }
+
+    #[test]
+    fn rejects_out_of_range_kdf_memory_cost() {
+        let salt = [0xab; SALT_LENGTH];
+        let nonce = [0x42; NONCE_LENGTH];
+        let mut too_low = KdfParams::production();
+        too_low.memory_cost = 4_096; // below the 8_192 minimum
+        let encoded = encode_raw(b"data", too_low, salt, nonce);
+        assert!(
+            open_with_key_and_salt(&encoded, "password").is_err(),
+            "memory_cost=4096 must be rejected"
+        );
+
+        let mut too_high = KdfParams::production();
+        too_high.memory_cost = 2_097_152; // above 1_048_576 max
+        let encoded = encode_raw(b"data", too_high, salt, nonce);
+        assert!(
+            open_with_key_and_salt(&encoded, "password").is_err(),
+            "memory_cost=2097152 must be rejected"
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_kdf_time_cost() {
+        let salt = [0xab; SALT_LENGTH];
+        let nonce = [0x42; NONCE_LENGTH];
+        let mut too_low = KdfParams::production();
+        too_low.time_cost = 0;
+        let encoded = encode_raw(b"data", too_low, salt, nonce);
+        assert!(
+            open_with_key_and_salt(&encoded, "password").is_err(),
+            "time_cost=0 must be rejected"
+        );
+
+        let mut too_high = KdfParams::production();
+        too_high.time_cost = 11;
+        let encoded = encode_raw(b"data", too_high, salt, nonce);
+        assert!(
+            open_with_key_and_salt(&encoded, "password").is_err(),
+            "time_cost=11 must be rejected"
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_kdf_parallelism() {
+        let salt = [0xab; SALT_LENGTH];
+        let nonce = [0x42; NONCE_LENGTH];
+        let mut too_low = KdfParams::production();
+        too_low.parallelism = 0;
+        let encoded = encode_raw(b"data", too_low, salt, nonce);
+        assert!(
+            open_with_key_and_salt(&encoded, "password").is_err(),
+            "parallelism=0 must be rejected"
+        );
+
+        let mut too_high = KdfParams::production();
+        too_high.parallelism = 9;
+        let encoded = encode_raw(b"data", too_high, salt, nonce);
+        assert!(
+            open_with_key_and_salt(&encoded, "password").is_err(),
+            "parallelism=9 must be rejected"
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_kdf_output_length() {
+        let salt = [0xab; SALT_LENGTH];
+        let nonce = [0x42; NONCE_LENGTH];
+        let mut too_short = KdfParams::production();
+        too_short.output_length = 16;
+        let encoded = encode_raw(b"data", too_short, salt, nonce);
+        assert!(
+            open_with_key_and_salt(&encoded, "password").is_err(),
+            "output_length=16 must be rejected"
+        );
+    }
 }

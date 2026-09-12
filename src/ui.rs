@@ -1,23 +1,25 @@
 use crate::otp::{current_timestamp, generate_code, remaining_seconds, Algorithm};
 use crate::qr_import::OtpParams;
-use crate::settings::AppSettings;
+use crate::settings::{
+    AppSettings, Theme, MAX_AUTO_LOCK_SECONDS, MAX_CLIPBOARD_CLEAR_SECONDS, MIN_AUTO_LOCK_SECONDS,
+    MIN_CLIPBOARD_CLEAR_SECONDS,
+};
 use crate::storage::{Account, Vault, VaultStore};
 use gtk::gdk::{ContentProvider, DragAction};
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
-    Adjustment, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, ComboBoxText,
-    Dialog, DialogFlags, DragSource, DropTarget, Entry, Grid, HeaderBar, Label, ListBox,
-    ListBoxRow, MenuButton, MessageDialog, Orientation, Paned, Popover, ResponseType,
-    ScrolledWindow, SelectionMode, SpinButton, Spinner, Stack, WidgetPaintable,
+    Adjustment, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType,
+    ComboBoxText, Dialog, DialogFlags, DragSource, DropTarget, Entry, EventControllerKey,
+    Grid, HeaderBar, Label, ListBox, ListBoxRow, MenuButton, MessageDialog, Orientation, Paned,
+    Popover, ResponseType, ScrolledWindow, SelectionMode, SpinButton, Spinner, Stack,
+    WidgetPaintable,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
-
-const AUTO_LOCK_SECONDS: u64 = 60;
 use uuid::Uuid;
 
 const APPLICATION_ID: &str = "com.nerzhul.notp";
@@ -357,9 +359,11 @@ struct RenderContext {
     row_labels: Rc<RefCell<HashMap<Uuid, Label>>>,
     detail: DetailWidgets,
     selected: Rc<Cell<Option<Uuid>>>,
+    filter: Rc<RefCell<String>>,
 }
 
 fn show_main_window(application: &Application, vault: Vault) {
+    let settings = AppSettings::load().unwrap_or_default();
     let window = ApplicationWindow::builder()
         .application(application)
         .title("Notp")
@@ -367,9 +371,12 @@ fn show_main_window(application: &Application, vault: Vault) {
         .default_height(600)
         .build();
 
+    apply_theme(&settings.theme);
+
     let vault = Rc::new(RefCell::new(vault));
     let selected = Rc::new(Cell::new(None::<Uuid>));
     let row_labels = Rc::new(RefCell::new(HashMap::new()));
+    let filter = Rc::new(RefCell::new(String::new()));
 
     let header = HeaderBar::new();
     let header_box = GtkBox::new(Orientation::Horizontal, 6);
@@ -400,13 +407,36 @@ fn show_main_window(application: &Application, vault: Vault) {
     import_menu_button.set_valign(gtk::Align::Center);
 
     let lock_button = Button::from_icon_name("system-lock-screen-symbolic");
-    lock_button.set_tooltip_text(Some("Lock the vault"));
+    lock_button.set_tooltip_text(Some("Lock the vault (Ctrl+L)"));
     lock_button.set_valign(gtk::Align::Center);
+
+    let menu_popover = Popover::new();
+    let menu_box = GtkBox::new(Orientation::Vertical, 0);
+    menu_box.set_margin_top(4);
+    menu_box.set_margin_bottom(4);
+    menu_box.set_margin_start(4);
+    menu_box.set_margin_end(4);
+    let preferences_button = Button::with_label("Preferences\u{2026}");
+    preferences_button.set_has_frame(false);
+    preferences_button.set_halign(gtk::Align::Fill);
+    let change_password_button = Button::with_label("Change master password\u{2026}");
+    change_password_button.set_has_frame(false);
+    change_password_button.set_halign(gtk::Align::Fill);
+    menu_box.append(&preferences_button);
+    menu_box.append(&change_password_button);
+    menu_popover.set_child(Some(&menu_box));
+
+    let menu_button = MenuButton::new();
+    menu_button.set_icon_name("open-menu-symbolic");
+    menu_button.set_popover(Some(&menu_popover));
+    menu_button.set_tooltip_text(Some("Application menu"));
+    menu_button.set_valign(gtk::Align::Center);
 
     header_box.append(&add_button);
     header_box.append(&import_menu_button);
     header_box.append(&lock_button);
     header.pack_start(&header_box);
+    header.pack_end(&menu_button);
     window.set_titlebar(Some(&header));
 
     let list_scroller = ScrolledWindow::new();
@@ -417,6 +447,13 @@ fn show_main_window(application: &Application, vault: Vault) {
     list_box.set_selection_mode(SelectionMode::Single);
     list_box.set_activate_on_single_click(false);
     list_scroller.set_child(Some(&list_box));
+
+    let search_entry = Entry::new();
+    search_entry.set_placeholder_text(Some("Search entries\u{2026}"));
+    search_entry.set_margin_start(12);
+    search_entry.set_margin_end(12);
+    search_entry.set_margin_top(8);
+    search_entry.set_margin_bottom(4);
 
     let detail_stack = Stack::new();
     detail_stack.set_hexpand(true);
@@ -464,13 +501,17 @@ fn show_main_window(application: &Application, vault: Vault) {
     detail_stack.add_named(&detail_content, Some("content"));
     detail_stack.set_visible_child_name("empty");
 
+    let list_box_container = GtkBox::new(Orientation::Vertical, 0);
+    list_box_container.append(&search_entry);
+    list_box_container.append(&list_scroller);
+
     let paned = Paned::new(Orientation::Horizontal);
     paned.set_vexpand(true);
     paned.set_resize_start_child(true);
     paned.set_shrink_start_child(false);
     paned.set_resize_end_child(true);
     paned.set_shrink_end_child(false);
-    paned.set_start_child(Some(&list_scroller));
+    paned.set_start_child(Some(&list_box_container));
     paned.set_end_child(Some(&detail_stack));
     paned.set_position(300);
 
@@ -501,6 +542,7 @@ fn show_main_window(application: &Application, vault: Vault) {
             remove: detail.remove.clone(),
         },
         selected: selected.clone(),
+        filter: filter.clone(),
     };
 
     list_box.connect_row_selected({
@@ -511,6 +553,14 @@ fn show_main_window(application: &Application, vault: Vault) {
                 .set(row.and_then(|row| Uuid::parse_str(row.widget_name().as_str()).ok()));
             show_selected(&context);
             refresh_codes(&context);
+        }
+    });
+
+    search_entry.connect_changed({
+        let context = context.clone();
+        move |entry| {
+            *context.filter.borrow_mut() = entry.text().to_string();
+            render_accounts(&context);
         }
     });
 
@@ -750,25 +800,7 @@ fn show_main_window(application: &Application, vault: Vault) {
     let context_for_copy = context.clone();
     let window_for_copy = window.clone();
     detail.copy.connect_clicked(move |_| {
-        let Some(id) = context_for_copy.selected.get() else {
-            return;
-        };
-        let code = {
-            let vault = context_for_copy.vault.borrow();
-            vault.data().account(id).and_then(|account| {
-                generate_code(
-                    account.secret(),
-                    current_timestamp(),
-                    account.digits,
-                    account.period,
-                    account.algorithm,
-                )
-                .ok()
-            })
-        };
-        if let Some(code) = code {
-            copy_to_clipboard(&window_for_copy, &code);
-        }
+        copy_current_code(&context_for_copy, &window_for_copy, ClipboardTarget::Code);
     });
 
     let context_for_remove = context.clone();
@@ -808,8 +840,10 @@ fn show_main_window(application: &Application, vault: Vault) {
     });
 
     render_accounts(&context);
+    let context_for_tick = context.clone();
     glib::timeout_add_seconds_local(1, move || {
-        refresh_codes(&context);
+        refresh_codes(&context_for_tick);
+        poll_clipboard_auto_clear();
         glib::ControlFlow::Continue
     });
 
@@ -852,6 +886,8 @@ fn show_main_window(application: &Application, vault: Vault) {
     let last_inactive_for_timer = last_inactive.clone();
     let window_for_timer = window.clone();
     let lock_action_for_timer = lock_action.clone();
+    let settings_for_timer = Rc::new(Cell::new(settings.auto_lock_seconds));
+    let settings_for_timer_clone = settings_for_timer.clone();
     glib::timeout_add_seconds_local(1, move || {
         if has_been_active_for_timer.get() && !window_for_timer.is_active() {
             let now = Instant::now();
@@ -861,13 +897,121 @@ fn show_main_window(application: &Application, vault: Vault) {
                     last_inactive_for_timer.set(Some(now));
                     now
                 });
-            if now.duration_since(last).as_secs() >= AUTO_LOCK_SECONDS {
+            if now.duration_since(last).as_secs() >= settings_for_timer_clone.get() {
                 lock_action_for_timer();
                 return glib::ControlFlow::Break;
             }
         }
         glib::ControlFlow::Continue
     });
+
+    let popover_for_menu = menu_popover.clone();
+    let settings_for_prefs = settings_for_timer.clone();
+    let window_for_prefs = window.clone();
+    let context_for_prefs = context.clone();
+    preferences_button.connect_clicked(move |_| {
+        popover_for_menu.popdown();
+        let settings_for_apply = settings_for_prefs.clone();
+        let window_for_apply = window_for_prefs.clone();
+        let context_for_apply = context_for_prefs.clone();
+        preferences_dialog(
+            &window_for_prefs,
+            AppSettings::load().unwrap_or_default(),
+            move |new_settings| {
+                settings_for_apply.set(new_settings.auto_lock_seconds);
+                apply_theme(&new_settings.theme);
+                if let Err(error) = new_settings.save() {
+                    show_error(
+                        &window_for_apply,
+                        "Unable to save preferences",
+                        &error.to_string(),
+                    );
+                }
+                let _ = context_for_apply;
+            },
+        );
+    });
+
+    let popover_for_password = menu_popover.clone();
+    let window_for_password = window.clone();
+    let context_for_password = context.clone();
+    change_password_button.connect_clicked(move |_| {
+        popover_for_password.popdown();
+        let window_for_apply = window_for_password.clone();
+        let context_for_change = context_for_password.clone();
+        change_password_dialog(&window_for_password, move |old, new_password| {
+            let result = context_for_change
+                .vault
+                .borrow_mut()
+                .change_password(old, new_password);
+            if let Err(error) = result {
+                show_error(
+                    &window_for_apply,
+                    "Unable to change password",
+                    &error.to_string(),
+                );
+            }
+        });
+    });
+
+    // --- Keyboard shortcuts -------------------------------------------------
+    let key_controller = EventControllerKey::new();
+    let context_for_keys = context.clone();
+    let list_box_for_keys = list_box.clone();
+    let search_for_keys = search_entry.clone();
+    let window_for_keys = window.clone();
+    let add_button_for_keys = add_button.clone();
+    key_controller.connect_key_pressed(move |_, key, _keycode, state| {
+        let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+        if ctrl && key == gtk::gdk::Key::n {
+            add_button_for_keys.emit_clicked();
+            return glib::Propagation::Stop;
+        }
+        if ctrl && !shift && key == gtk::gdk::Key::e {
+            if let Some(id) = context_for_keys.selected.get() {
+                edit_selected(&context_for_keys, &window_for_keys, id);
+            }
+            return glib::Propagation::Stop;
+        }
+        if ctrl && !shift && key == gtk::gdk::Key::c {
+            copy_current_code(&context_for_keys, &window_for_keys, ClipboardTarget::Code);
+            return glib::Propagation::Stop;
+        }
+        if ctrl && shift && key == gtk::gdk::Key::C {
+            copy_current_code(&context_for_keys, &window_for_keys, ClipboardTarget::Secret);
+            return glib::Propagation::Stop;
+        }
+        if ctrl && key == gtk::gdk::Key::l {
+            lock_action();
+            return glib::Propagation::Stop;
+        }
+        if ctrl && key == gtk::gdk::Key::f {
+            search_for_keys.grab_focus();
+            return glib::Propagation::Stop;
+        }
+        if key == gtk::gdk::Key::Delete || key == gtk::gdk::Key::KP_Delete {
+            if let Some(id) = context_for_keys.selected.get() {
+                request_delete(&context_for_keys, &window_for_keys, id);
+            }
+            return glib::Propagation::Stop;
+        }
+        if !ctrl && !shift {
+            match key {
+                gtk::gdk::Key::Home => {
+                    select_first_or_last(&list_box_for_keys, true);
+                    return glib::Propagation::Stop;
+                }
+                gtk::gdk::Key::End => {
+                    select_first_or_last(&list_box_for_keys, false);
+                    return glib::Propagation::Stop;
+                }
+                _ => {}
+            }
+        }
+        glib::Propagation::Proceed
+    });
+    window.add_controller(key_controller);
 
     window.present();
 }
@@ -981,12 +1125,20 @@ fn render_accounts(context: &RenderContext) {
     }
     context.row_labels.borrow_mut().clear();
 
+    let filter = context.filter.borrow().clone();
+    let needle = filter.trim().to_lowercase();
+
     let accounts = {
         let vault = context.vault.borrow();
         vault
             .data()
             .accounts
             .iter()
+            .filter(|account| {
+                needle.is_empty()
+                    || account.issuer.to_lowercase().contains(&needle)
+                    || account.name.to_lowercase().contains(&needle)
+            })
             .map(|account| (account.id, account.issuer.clone(), account.name.clone()))
             .collect::<Vec<_>>()
     };
@@ -1024,7 +1176,9 @@ fn render_accounts(context: &RenderContext) {
         }
     }
 
-    let selected = selected.or(first_id);
+    let selected = selected
+        .filter(|_| context.list_box.row_at_index(0).map_or(false, |_| true))
+        .or(first_id);
     context.selected.set(selected);
     if let Some(id) = selected {
         let mut position = 0;
@@ -1326,6 +1480,103 @@ fn show_application_error(application: &Application, title: &str, message: &str)
 }
 
 fn copy_to_clipboard(window: &ApplicationWindow, text: &str) {
+    set_clipboard_content(window, text);
+}
+
+#[derive(Copy, Clone)]
+enum ClipboardTarget {
+    Code,
+    Secret,
+}
+
+fn copy_current_code(context: &RenderContext, window: &ApplicationWindow, target: ClipboardTarget) {
+    let Some(id) = context.selected.get() else {
+        return;
+    };
+    let snapshot = {
+        let vault = context.vault.borrow();
+        vault.data().account(id).map(|account| {
+            (
+                account.issuer.clone(),
+                account.name.clone(),
+                generate_code(
+                    account.secret(),
+                    current_timestamp(),
+                    account.digits,
+                    account.period,
+                    account.algorithm,
+                )
+                .unwrap_or_else(|_| "------".to_string()),
+                account.secret().to_string(),
+            )
+        })
+    };
+    let Some((issuer, name, code, secret)) = snapshot else {
+        return;
+    };
+    match target {
+        ClipboardTarget::Code => {
+            copy_to_clipboard(window, &code);
+            register_clipboard_auto_clear(window, code);
+        }
+        ClipboardTarget::Secret => {
+            copy_to_clipboard(window, &secret);
+            register_clipboard_auto_clear(window, secret);
+        }
+    }
+    let _ = (issuer, name);
+}
+
+fn register_clipboard_auto_clear(window: &ApplicationWindow, value: String) {
+    let settings = AppSettings::load().unwrap_or_default();
+    let delay = settings.clipboard_clear_seconds;
+    if delay == 0 {
+        PENDING_CLIPBOARD_CLEAR.with(|state| {
+            *state.borrow_mut() = None;
+        });
+        return;
+    }
+    let expires_at = Instant::now() + std::time::Duration::from_secs(delay);
+    let window = window.clone();
+    PENDING_CLIPBOARD_CLEAR.with(|state| {
+        *state.borrow_mut() = Some(PendingClipboardClear {
+            expires_at,
+            value,
+            window,
+        });
+    });
+}
+
+thread_local! {
+    static PENDING_CLIPBOARD_CLEAR: RefCell<Option<PendingClipboardClear>> = const { RefCell::new(None) };
+}
+
+struct PendingClipboardClear {
+    expires_at: Instant,
+    value: String,
+    window: ApplicationWindow,
+}
+
+fn poll_clipboard_auto_clear() -> bool {
+    PENDING_CLIPBOARD_CLEAR.with(|state| {
+        let mut slot = state.borrow_mut();
+        let Some(pending) = slot.as_ref() else {
+            return false;
+        };
+        if Instant::now() < pending.expires_at {
+            return false;
+        }
+        let window = pending.window.clone();
+        let expected = pending.value.clone();
+        if read_clipboard_text(&window).as_deref() == Some(expected.as_str()) {
+            clear_clipboard(&window);
+        }
+        *slot = None;
+        true
+    })
+}
+
+fn set_clipboard_content(window: &ApplicationWindow, text: &str) {
     let owned = text.to_owned();
     if copy_via_gdk(window, &owned).is_ok() {
         return;
@@ -1357,6 +1608,22 @@ fn copy_via_gdk(window: &ApplicationWindow, text: &str) -> std::result::Result<(
     Ok(())
 }
 
+fn read_clipboard_text(window: &ApplicationWindow) -> Option<String> {
+    use gdk4::prelude::DisplayExt;
+    let display = gtk::prelude::RootExt::display(window);
+    let clipboard = display.clipboard();
+    let provider = clipboard.content()?;
+    let value: gtk::glib::Value = provider.value(gtk::glib::Type::STRING).ok()?;
+    value.get::<String>().ok()
+}
+
+fn clear_clipboard(window: &ApplicationWindow) {
+    use gdk4::prelude::DisplayExt;
+    let display = gtk::prelude::RootExt::display(window);
+    let clipboard = display.clipboard();
+    clipboard.set_text("");
+}
+
 fn clipboard_command_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
     let mut candidates = Vec::new();
     if std::env::var_os("WAYLAND_DISPLAY").is_some()
@@ -1367,4 +1634,306 @@ fn clipboard_command_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
     candidates.push(("xclip", vec!["-selection", "clipboard"]));
     candidates.push(("xsel", vec!["--clipboard", "--input"]));
     candidates
+}
+
+fn select_first_or_last(list_box: &ListBox, first: bool) {
+    let total = list_box.observe_children().n_items();
+    if total == 0 {
+        return;
+    }
+    let index = if first { 0 } else { (total - 1) as i32 };
+    if let Some(row) = list_box.row_at_index(index) {
+        list_box.select_row(Some(&row));
+    }
+}
+
+fn request_delete(context: &RenderContext, window: &ApplicationWindow, id: Uuid) {
+    let snapshot = {
+        let vault = context.vault.borrow();
+        vault
+            .data()
+            .account(id)
+            .map(|account| (account.issuer.clone(), account.name.clone()))
+    };
+    let Some((issuer, name)) = snapshot else {
+        return;
+    };
+    let message = format!("Delete the entry « {} » ({}) ?", name, issuer);
+    let context_for_confirmation = context.clone();
+    let window_for_confirmation = window.clone();
+    confirm(&window_for_confirmation.clone(), "Delete entry", &message, move || {
+        let result = context_for_confirmation
+            .vault
+            .borrow_mut()
+            .remove_account(id);
+        if let Err(error) = result {
+            show_error(&window_for_confirmation, "Unable to save the vault", &error.to_string());
+        } else {
+            context_for_confirmation.selected.set(None);
+            render_accounts(&context_for_confirmation);
+        }
+    });
+}
+
+fn edit_selected(context: &RenderContext, window: &ApplicationWindow, id: Uuid) {
+    let snapshot = {
+        let vault = context.vault.borrow();
+        vault.data().account(id).map(|account| {
+            (
+                account.issuer.clone(),
+                account.name.clone(),
+                account.secret().to_string(),
+                account.digits,
+                account.period,
+                account.algorithm,
+            )
+        })
+    };
+    let Some((issuer, name, secret, digits, period, algorithm)) = snapshot else {
+        return;
+    };
+    let params = OtpParams {
+        issuer,
+        label: name,
+        secret,
+        digits,
+        period,
+        algorithm,
+    };
+    let context_for_save = context.clone();
+    let window_for_save = window.clone();
+    add_account_dialog(window, Some(params), move |account| {
+        let Some(account) = account else {
+            return;
+        };
+        let result = {
+            let mut vault = context_for_save.vault.borrow_mut();
+            let data = vault.data_mut();
+            if let Some(position) = data.accounts.iter().position(|existing| existing.id == id) {
+                data.accounts[position] = account;
+            } else {
+                if let Err(error) = data.add_account(account) {
+                    drop(vault);
+                    show_error(&window_for_save, "Invalid entry", &error.to_string());
+                    return;
+                }
+            }
+            vault.save()
+        };
+        match result {
+            Ok(()) => {
+                context_for_save.selected.set(Some(id));
+                render_accounts(&context_for_save);
+            }
+            Err(error) => show_error(
+                &window_for_save,
+                "Unable to save the vault",
+                &error.to_string(),
+            ),
+        }
+    });
+}
+
+fn preferences_dialog<F>(parent: &ApplicationWindow, current: AppSettings, on_apply: F)
+where
+    F: FnOnce(AppSettings) + 'static,
+{
+    let parent_for_error = parent.clone();
+    let dialog = Dialog::with_buttons(
+        Some("Preferences"),
+        Some(parent),
+        DialogFlags::MODAL,
+        &[
+            ("Cancel", ResponseType::Cancel),
+            ("Apply", ResponseType::Accept),
+        ],
+    );
+    dialog.set_default_size(500, 280);
+    if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
+        button.add_css_class("suggested-action");
+        dialog.set_default_widget(Some(&button));
+    }
+
+    let container = GtkBox::new(Orientation::Vertical, 0);
+    container.set_margin_start(20);
+    container.set_margin_end(20);
+    container.set_margin_top(18);
+    container.set_margin_bottom(18);
+
+    let grid = Grid::new();
+    grid.set_row_spacing(10);
+    grid.set_column_spacing(12);
+    grid.set_hexpand(true);
+
+    let auto_lock_adjustment = Adjustment::new(
+        current.auto_lock_seconds as f64,
+        MIN_AUTO_LOCK_SECONDS as f64,
+        MAX_AUTO_LOCK_SECONDS as f64,
+        1.0,
+        10.0,
+        0.0,
+    );
+    let auto_lock = SpinButton::new(Some(&auto_lock_adjustment), 1.0, 0);
+    auto_lock.set_value(current.auto_lock_seconds as f64);
+    auto_lock.set_hexpand(true);
+    auto_lock.set_halign(gtk::Align::End);
+    auto_lock.set_width_chars(8);
+
+    let clipboard_adjustment = Adjustment::new(
+        current.clipboard_clear_seconds as f64,
+        MIN_CLIPBOARD_CLEAR_SECONDS as f64,
+        MAX_CLIPBOARD_CLEAR_SECONDS as f64,
+        1.0,
+        5.0,
+        0.0,
+    );
+    let clipboard_clear = SpinButton::new(Some(&clipboard_adjustment), 1.0, 0);
+    clipboard_clear.set_value(current.clipboard_clear_seconds as f64);
+    clipboard_clear.set_hexpand(true);
+    clipboard_clear.set_halign(gtk::Align::End);
+    clipboard_clear.set_width_chars(8);
+    let clipboard_hint = Label::new(Some("(0 disables auto-clear)"));
+    clipboard_hint.set_xalign(1.0);
+    clipboard_hint.set_margin_top(2);
+    clipboard_hint.add_css_class("dim-label");
+
+    let theme_combo = ComboBoxText::new();
+    theme_combo.append(Some("system"), "Follow system");
+    theme_combo.append(Some("light"), "Light");
+    theme_combo.append(Some("dark"), "Dark");
+    theme_combo.set_active_id(Some(match current.theme {
+        Theme::Light => "light",
+        Theme::Dark => "dark",
+        Theme::System => "system",
+    }));
+    theme_combo.set_hexpand(true);
+    theme_combo.set_halign(gtk::Align::End);
+
+    let mut row = 0;
+    add_field(
+        &grid,
+        &Label::new(Some("Auto-lock after (seconds)")),
+        &auto_lock,
+        row,
+    );
+    row += 1;
+    add_field(
+        &grid,
+        &Label::new(Some("Auto-clear clipboard (seconds)")),
+        &clipboard_clear,
+        row,
+    );
+    grid.attach(&clipboard_hint, 1, row, 1, 1);
+    row += 1;
+    add_field(&grid, &Label::new(Some("Theme")), &theme_combo, row);
+
+    container.append(&grid);
+    dialog.content_area().append(&container);
+
+    dialog.run_async(move |dialog, response| {
+        if response == ResponseType::Accept {
+            let theme = match theme_combo.active_id().as_deref() {
+                Some("light") => Theme::Light,
+                Some("dark") => Theme::Dark,
+                _ => Theme::System,
+            };
+            let mut updated = current;
+            updated.auto_lock_seconds = auto_lock.value() as u64;
+            updated.clipboard_clear_seconds = clipboard_clear.value() as u64;
+            updated.theme = theme;
+            on_apply(updated.normalized());
+        }
+        dialog.close();
+    });
+    let _ = parent_for_error;
+}
+
+fn change_password_dialog<F>(parent: &ApplicationWindow, on_apply: F)
+where
+    F: FnOnce(&str, &str) + 'static,
+{
+    let parent_for_error = parent.clone();
+    let dialog = Dialog::with_buttons(
+        Some("Change master password"),
+        Some(parent),
+        DialogFlags::MODAL,
+        &[
+            ("Cancel", ResponseType::Cancel),
+            ("Change", ResponseType::Accept),
+        ],
+    );
+    dialog.set_default_size(500, 260);
+    if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
+        button.add_css_class("suggested-action");
+        dialog.set_default_widget(Some(&button));
+    }
+
+    let container = GtkBox::new(Orientation::Vertical, 0);
+    container.set_margin_start(20);
+    container.set_margin_end(20);
+    container.set_margin_top(18);
+    container.set_margin_bottom(18);
+
+    let grid = Grid::new();
+    grid.set_row_spacing(10);
+    grid.set_column_spacing(12);
+    grid.set_hexpand(true);
+
+    let current_entry = Entry::new();
+    current_entry.set_visibility(false);
+    current_entry.set_input_purpose(gtk::InputPurpose::Password);
+    current_entry.set_placeholder_text(Some("Current master password"));
+    current_entry.set_hexpand(true);
+    let new_entry = Entry::new();
+    new_entry.set_visibility(false);
+    new_entry.set_input_purpose(gtk::InputPurpose::Password);
+    new_entry.set_placeholder_text(Some("New password (8 chars minimum)"));
+    new_entry.set_hexpand(true);
+    let confirm_entry = Entry::new();
+    confirm_entry.set_visibility(false);
+    confirm_entry.set_input_purpose(gtk::InputPurpose::Password);
+    confirm_entry.set_placeholder_text(Some("Confirm new password"));
+    confirm_entry.set_hexpand(true);
+
+    let mut row = 0;
+    add_field(&grid, &Label::new(Some("Current")), &current_entry, row);
+    row += 1;
+    add_field(&grid, &Label::new(Some("New")), &new_entry, row);
+    row += 1;
+    add_field(&grid, &Label::new(Some("Confirm")), &confirm_entry, row);
+    container.append(&grid);
+    dialog.content_area().append(&container);
+
+    dialog.run_async(move |dialog, response| {
+        if response != ResponseType::Accept {
+            dialog.close();
+            return;
+        }
+        let current = current_entry.text().to_string();
+        let new_password = new_entry.text().to_string();
+        let confirmation = confirm_entry.text().to_string();
+        if new_password != confirmation {
+            show_error(
+                &parent_for_error,
+                "Invalid new password",
+                "Password confirmation does not match",
+            );
+            dialog.close();
+            return;
+        }
+        on_apply(&current, &new_password);
+        dialog.close();
+    });
+}
+
+fn apply_theme(theme: &Theme) {
+    let theme_name = match theme {
+        Theme::Light => "light",
+        Theme::Dark => "dark",
+        Theme::System => "default",
+    };
+    if let Some(settings) = gtk::Settings::default() {
+        settings.set_property("gtk-application-prefer-dark-theme", matches!(theme, Theme::Dark));
+    }
+    let _ = theme_name;
 }

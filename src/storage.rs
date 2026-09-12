@@ -159,6 +159,8 @@ pub struct Vault {
     key: [u8; 32],
     salt: [u8; SALT_LENGTH],
     store: VaultStore,
+    #[allow(dead_code)]
+    lock: Option<VaultLock>,
 }
 
 impl Vault {
@@ -182,7 +184,44 @@ impl Vault {
             bincode::serialize(&self.data).context("Unable to serialize entries")?;
         let encoded = crypto::seal_with_key_and_salt(&plaintext, &self.key, &self.salt)?;
         plaintext.zeroize();
+        backup_previous(self.store.path())?;
         write_atomic(self.store.path(), &encoded)
+    }
+
+    pub fn change_password(&mut self, old_password: &str, new_password: &str) -> Result<()> {
+        validate_password(new_password)?;
+        let (rederived_key, _, _) =
+            crypto::open_with_key_and_salt(&self.store.read_encrypted()?, old_password)?;
+        if !constant_time_eq(&rederived_key, &self.key) {
+            let mut to_wipe = rederived_key;
+            to_wipe.zeroize();
+            bail!("Old password is incorrect");
+        }
+        let mut to_wipe = rederived_key;
+        to_wipe.zeroize();
+        let mut new_salt = [0_u8; SALT_LENGTH];
+        OsRng.fill_bytes(&mut new_salt);
+        let mut new_key = crypto::derive_production_key(new_password, &new_salt)?;
+        let mut plaintext =
+            bincode::serialize(&self.data).context("Unable to serialize the vault")?;
+        let encoded = crypto::seal_with_key_and_salt(&plaintext, &new_key, &new_salt)?;
+        plaintext.zeroize();
+        backup_previous(self.store.path())?;
+        let result = write_atomic(self.store.path(), &encoded);
+        match result {
+            Ok(()) => {
+                self.key.zeroize();
+                self.salt.zeroize();
+                self.key = new_key;
+                self.salt = new_salt;
+                Ok(())
+            }
+            Err(error) => {
+                new_key.zeroize();
+                new_salt.zeroize();
+                Err(error)
+            }
+        }
     }
 
     pub fn remove_account(&mut self, id: Uuid) -> Result<Option<Account>> {
@@ -285,16 +324,16 @@ impl VaultStore {
         let mut plaintext = bincode::serialize(&data).context("Unable to serialize the vault")?;
         let mut salt = [0_u8; SALT_LENGTH];
         OsRng.fill_bytes(&mut salt);
-        let mut key = crypto::derive_production_key(password, &salt)?;
+        let key = crypto::derive_production_key(password, &salt)?;
         let encoded = crypto::seal_with_key_and_salt(&plaintext, &key, &salt)?;
         plaintext.zeroize();
-        key.zeroize();
         write_atomic(&self.path, &encoded)?;
         Ok(Vault {
             data,
             key,
             salt,
             store: self.clone(),
+            lock: None,
         })
     }
 
@@ -302,6 +341,8 @@ impl VaultStore {
         if !self.exists() {
             bail!("Vault does not exist");
         }
+        let lock = VaultLock::acquire(&self.path)
+            .context("Vault is already locked by another instance")?;
         let encoded = fs::read(&self.path).context("Unable to read the vault")?;
         let (key, salt, mut plaintext) = crypto::open_with_key_and_salt(&encoded, password)?;
         let data: VaultData =
@@ -319,8 +360,90 @@ impl VaultStore {
             key,
             salt,
             store: self.clone(),
+            lock: Some(lock),
         })
     }
+
+    fn read_encrypted(&self) -> Result<Vec<u8>> {
+        fs::read(&self.path).context("Unable to read the vault")
+    }
+}
+
+/// Cooperative exclusive lock on the vault file (single-instance guarantee).
+/// On non-Unix platforms this is a no-op (returns `Ok`).
+#[cfg(unix)]
+struct VaultLock {
+    _file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl VaultLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        use std::io::ErrorKind;
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)
+            .with_context(|| format!("Unable to open {}", path.display()))?;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            let err = std::io::Error::last_os_error();
+            // On some FS the lock may be advisory; surface a clean message either way.
+            return Err(anyhow::Error::new(match err.kind() {
+                ErrorKind::WouldBlock | ErrorKind::AlreadyExists => err,
+                _ => err,
+            })
+            .context("Vault is already locked by another instance"));
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+#[cfg(not(unix))]
+struct VaultLock;
+
+#[cfg(not(unix))]
+impl VaultLock {
+    fn acquire(_path: &Path) -> Result<Self> {
+        Ok(Self)
+    }
+}
+
+fn backup_previous(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let backup_path = path.with_extension("notp.bak");
+    if backup_path.exists() {
+        fs::remove_file(&backup_path)
+            .with_context(|| format!("Unable to remove {}", backup_path.display()))?;
+    }
+    fs::copy(path, &backup_path).with_context(|| {
+        format!(
+            "Unable to write backup {}",
+            backup_path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(&backup_path, permissions);
+    }
+    Ok(())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 pub fn validate_password(password: &str) -> Result<()> {
@@ -407,6 +530,107 @@ mod tests {
         assert!(store.unlock("wrong password").is_err());
         let reopened = store.unlock("correct horse battery staple").unwrap();
         assert_eq!(reopened.data().accounts.len(), 1);
+    }
+
+    #[test]
+    fn change_password_reencrypts_vault() {
+        let directory = tempdir().unwrap();
+        let store = VaultStore::from_path(directory.path().join("vault.notp"));
+        let mut vault = store
+            .create("correct horse battery staple")
+            .unwrap();
+        let account = Account::new(
+            "Example".to_string(),
+            "alice@example.com".to_string(),
+            "JBSWY3DPEHPK3PXP".to_string(),
+            6,
+            30,
+            Algorithm::Sha1,
+        )
+        .unwrap();
+        vault.data_mut().add_account(account).unwrap();
+        vault.save().unwrap();
+
+        vault
+            .change_password("correct horse battery staple", "new pass phrase!")
+            .unwrap();
+
+        assert!(store.unlock("correct horse battery staple").is_err());
+        let reopened = store.unlock("new pass phrase!").unwrap();
+        assert_eq!(reopened.data().accounts.len(), 1);
+    }
+
+    #[test]
+    fn change_password_rejects_wrong_old() {
+        let directory = tempdir().unwrap();
+        let store = VaultStore::from_path(directory.path().join("vault.notp"));
+        let mut vault = store.create("right password").unwrap();
+        assert!(vault
+            .change_password("wrong password", "new password")
+            .is_err());
+    }
+
+    #[test]
+    fn rejects_short_new_password() {
+        let directory = tempdir().unwrap();
+        let store = VaultStore::from_path(directory.path().join("vault.notp"));
+        let mut vault = store.create("right password").unwrap();
+        assert!(vault.change_password("right password", "short").is_err());
+    }
+
+    #[test]
+    fn save_writes_backup() {
+        let directory = tempdir().unwrap();
+        let vault_path = directory.path().join("vault.notp");
+        let store = VaultStore::from_path(vault_path.clone());
+        let mut vault = store.create("right password").unwrap();
+        let first = Account::new(
+            "Example".to_string(),
+            "alice@example.com".to_string(),
+            "JBSWY3DPEHPK3PXP".to_string(),
+            6,
+            30,
+            Algorithm::Sha1,
+        )
+        .unwrap();
+        vault.data_mut().add_account(first).unwrap();
+        vault.save().unwrap();
+
+        let second = Account::new(
+            "Example".to_string(),
+            "bob@example.com".to_string(),
+            "JBSWY3DPEHPK3PXP".to_string(),
+            6,
+            30,
+            Algorithm::Sha1,
+        )
+        .unwrap();
+        vault.data_mut().add_account(second).unwrap();
+        vault.save().unwrap();
+
+        let backup = vault_path.with_extension("notp.bak");
+        assert!(backup.is_file(), "backup file must be created on save");
+        let backup_store = VaultStore::from_path(backup.clone());
+        let backup_vault = backup_store.unlock("right password").unwrap();
+        assert_eq!(
+            backup_vault.data().accounts.len(),
+            1,
+            "backup must reflect the previous vault state (one account)"
+        );
+
+        let current = store.unlock("right password").unwrap();
+        assert_eq!(current.data().accounts.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flock_blocks_second_unlock() {
+        let directory = tempdir().unwrap();
+        let store = VaultStore::from_path(directory.path().join("vault.notp"));
+        store.create("right password").unwrap();
+        let _locked = store.unlock("right password").unwrap();
+        let second = store.unlock("right password");
+        assert!(second.is_err(), "second unlock on the same vault must fail");
     }
 
     #[test]
