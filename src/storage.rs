@@ -125,6 +125,23 @@ impl VaultData {
         }
     }
 
+    pub fn reorder_account(&mut self, id: Uuid, new_position: usize) -> Option<usize> {
+        let current = self.accounts.iter().position(|account| account.id == id)?;
+        if current == new_position {
+            return Some(current);
+        }
+        let account = self.accounts.remove(current);
+        let target = new_position.min(self.accounts.len());
+        let adjusted = if new_position > current {
+            target
+        } else {
+            target
+        };
+        self.accounts.insert(adjusted, account);
+        self.updated_at = current_timestamp();
+        Some(adjusted)
+    }
+
     #[cfg(feature = "gtk")]
     pub fn account(&self, id: Uuid) -> Option<&Account> {
         self.accounts.iter().find(|account| account.id == id)
@@ -179,6 +196,39 @@ impl Vault {
                 }
             },
             None => Ok(None),
+        }
+    }
+
+    pub fn reorder_account(&mut self, id: Uuid, new_position: usize) -> Result<Option<usize>> {
+        let original_order = self
+            .data
+            .accounts
+            .iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>();
+        let new_index = self.data.reorder_account(id, new_position);
+        let Some(new_index) = new_index else {
+            return Ok(None);
+        };
+        if original_order
+            .iter()
+            .position(|candidate| *candidate == id)
+            .map_or(false, |current| current == new_index)
+        {
+            return Ok(Some(new_index));
+        }
+        match self.save() {
+            Ok(()) => Ok(Some(new_index)),
+            Err(error) => {
+                self.data.accounts.sort_by_key(|account| {
+                    original_order
+                        .iter()
+                        .position(|candidate| *candidate == account.id)
+                        .unwrap_or(usize::MAX)
+                });
+                self.data.updated_at = current_timestamp();
+                Err(error)
+            }
         }
     }
 }
@@ -357,5 +407,56 @@ mod tests {
         assert!(store.unlock("wrong password").is_err());
         let reopened = store.unlock("correct horse battery staple").unwrap();
         assert_eq!(reopened.data().accounts.len(), 1);
+    }
+
+    #[test]
+    fn reorder_account_persists_across_unlocks() {
+        let directory = tempdir().unwrap();
+        let store = VaultStore::from_path(directory.path().join("vault.notp"));
+        store.create("correct horse battery staple").unwrap();
+        let mut vault = store.unlock("correct horse battery staple").unwrap();
+        let first = Account::new(
+            "Example".to_string(),
+            "alice@example.com".to_string(),
+            "JBSWY3DPEHPK3PXP".to_string(),
+            6,
+            30,
+            Algorithm::Sha1,
+        )
+        .unwrap();
+        let first_id = vault.data_mut().add_account(first).unwrap();
+        let second = Account::new(
+            "Example".to_string(),
+            "bob@example.com".to_string(),
+            "JBSWY3DPEHPK3PXP".to_string(),
+            6,
+            30,
+            Algorithm::Sha1,
+        )
+        .unwrap();
+        let second_id = vault.data_mut().add_account(second).unwrap();
+        vault.save().unwrap();
+
+        assert_eq!(
+            vault.reorder_account(first_id, 0).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            vault.reorder_account(first_id, 5).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            vault.reorder_account(second_id, 0).unwrap(),
+            Some(0)
+        );
+
+        let reopened = store.unlock("correct horse battery staple").unwrap();
+        let order = reopened
+            .data()
+            .accounts
+            .iter()
+            .map(|account| account.id)
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec![second_id, first_id]);
     }
 }

@@ -2,12 +2,14 @@ use crate::otp::{current_timestamp, generate_code, remaining_seconds, Algorithm}
 use crate::qr_import::OtpParams;
 use crate::settings::AppSettings;
 use crate::storage::{Account, Vault, VaultStore};
+use gtk::gdk::{ContentProvider, DragAction};
+use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
     Adjustment, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, ComboBoxText,
-    Dialog, DialogFlags, Entry, Grid, HeaderBar, Label, ListBox, ListBoxRow, MenuButton,
-    MessageDialog, Orientation, Paned, Popover, ResponseType, ScrolledWindow, SelectionMode,
-    SpinButton, Spinner, Stack,
+    Dialog, DialogFlags, DragSource, DropTarget, Entry, Grid, HeaderBar, Label, ListBox,
+    ListBoxRow, MenuButton, MessageDialog, Orientation, Paned, Popover, ResponseType,
+    ScrolledWindow, SelectionMode, SpinButton, Spinner, Stack, WidgetPaintable,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -870,6 +872,109 @@ fn show_main_window(application: &Application, vault: Vault) {
     window.present();
 }
 
+fn attach_drag_handlers(context: &RenderContext, row: &ListBoxRow, id: Uuid) {
+    let drag_source = DragSource::new();
+    drag_source.set_actions(DragAction::MOVE);
+    let id_string = id.to_string();
+    let content = ContentProvider::for_value(&id_string.to_value());
+    drag_source.set_content(Some(&content));
+    let row_for_icon = row.clone();
+    drag_source.connect_drag_begin(move |source, _drag| {
+        let paintable = WidgetPaintable::new(Some(&row_for_icon));
+        source.set_icon(Some(&paintable), 0, 0);
+        row_for_icon.add_css_class("dragging");
+    });
+    let row_for_source_end = row.clone();
+    drag_source.connect_drag_end(move |_source, _drag, _delete| {
+        row_for_source_end.remove_css_class("dragging");
+    });
+    row.add_controller(drag_source);
+
+    let drop_target = DropTarget::new(glib::Type::STRING, DragAction::MOVE);
+    let context_for_drop = context.clone();
+    let context_for_enter = context.clone();
+    drop_target.connect_enter(move |target, _x, y| {
+        if let Some(widget) = target.widget() {
+            if let Ok(row) = widget.downcast::<ListBoxRow>() {
+                let height = row.height() as f64;
+                let after = height > 0.0 && y > height / 2.0;
+                if after {
+                    row.add_css_class("drop-after");
+                    row.remove_css_class("drop-before");
+                } else {
+                    row.add_css_class("drop-before");
+                    row.remove_css_class("drop-after");
+                }
+                let _ = &context_for_enter;
+            }
+        }
+        DragAction::MOVE
+    });
+    drop_target.connect_leave(move |target| {
+        if let Some(widget) = target.widget() {
+            if let Ok(row) = widget.downcast::<ListBoxRow>() {
+                row.remove_css_class("drop-before");
+                row.remove_css_class("drop-after");
+            }
+        }
+    });
+
+    drop_target.connect_local("drop", false, move |values| {
+        let drop_target_obj = match values[0].get::<DropTarget>() {
+            Ok(t) => t,
+            Err(_) => return Some(false.to_value()),
+        };
+        let _drop = values[1].get::<gtk::gdk::Drop>().ok();
+        let y = values[3].get::<f64>().unwrap_or(0.0);
+        let widget = match drop_target_obj.widget() {
+            Some(w) => w,
+            None => return Some(false.to_value()),
+        };
+        let row = match widget.downcast::<ListBoxRow>() {
+            Ok(r) => r,
+            Err(_) => return Some(false.to_value()),
+        };
+        let value = match drop_target_obj.value() {
+            Some(v) => v,
+            None => return Some(false.to_value()),
+        };
+        let source_id = match value.get::<String>() {
+            Ok(text) => match Uuid::parse_str(&text) {
+                Ok(id) => id,
+                Err(_) => return Some(false.to_value()),
+            },
+            Err(_) => return Some(false.to_value()),
+        };
+        let total = {
+            let vault = context_for_drop.vault.borrow();
+            vault.data().accounts.len()
+        };
+        let target_index = row.index() as usize;
+        let height = row.height() as f64;
+        let insert_after = height > 0.0 && y > height / 2.0;
+        let desired = if insert_after {
+            target_index + 1
+        } else {
+            target_index
+        };
+        let new_position = desired.min(total);
+        let result = context_for_drop
+            .vault
+            .borrow_mut()
+            .reorder_account(source_id, new_position);
+        match result {
+            Ok(Some(_)) => {
+                context_for_drop.selected.set(Some(source_id));
+                render_accounts(&context_for_drop);
+                Some(true.to_value())
+            }
+            Ok(None) | Err(_) => Some(false.to_value()),
+        }
+    });
+
+    row.add_controller(drop_target);
+}
+
 fn render_accounts(context: &RenderContext) {
     while let Some(child) = context.list_box.first_child() {
         context.list_box.remove(&child);
@@ -911,6 +1016,7 @@ fn render_accounts(context: &RenderContext) {
         row_box.append(&title_box);
         row_box.append(&code_label);
         row.set_child(Some(&row_box));
+        attach_drag_handlers(&context, &row, id);
         context.list_box.append(&row);
         context.row_labels.borrow_mut().insert(id, code_label);
         if first_id.is_none() {

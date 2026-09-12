@@ -18,7 +18,8 @@ third-party service.
   confirmed before the entries are written to the vault.
 - GTK 4 user interface with an open-or-create vault dialog, an account
   list with a detail / code panel, copy-to-clipboard and per-entry
-  deletion, and reliable error reporting.
+  deletion, drag-and-drop reordering of entries (the order is persisted
+  with the vault), and reliable error reporting.
 - Auto-lock: the vault is locked automatically after 60 seconds without
   user input and can also be locked manually from the header bar.
 - Clipboard copy via GTK's GDK clipboard with a transparent fallback to
