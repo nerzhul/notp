@@ -1,5 +1,6 @@
 use crate::otp::{current_timestamp, generate_code, remaining_seconds, Algorithm};
 use crate::qr_import::OtpParams;
+use crate::settings::AppSettings;
 use crate::storage::{Account, Vault, VaultStore};
 use gtk::prelude::*;
 use gtk::{
@@ -10,6 +11,7 @@ use gtk::{
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -25,36 +27,34 @@ pub fn run() {
         .build();
 
     application.connect_activate(move |app| {
-        let store = match VaultStore::new() {
-            Ok(store) => store,
-            Err(error) => {
-                show_application_error(app, "Storage unavailable", &error.to_string());
-                return;
-            }
-        };
-        if store.exists() {
-            show_unlock_window(app, store, None);
-        } else {
-            show_setup_window(app, store);
-        }
+        show_load_window(app, None);
     });
 
     application.run();
 }
 
-fn show_setup_window(application: &Application, store: VaultStore) {
+fn show_load_window(application: &Application, window_to_destroy: Option<ApplicationWindow>) {
+    let settings = AppSettings::load().unwrap_or_default();
+    let default_path = VaultStore::default_path()
+        .unwrap_or_else(|_| PathBuf::from("vault.notp"));
+    let initial_path = settings
+        .last_vault_path
+        .clone()
+        .unwrap_or_else(|| default_path.clone());
+    let has_saved_path = settings.last_vault_path.is_some();
+
     let window = ApplicationWindow::builder()
         .application(application)
-        .title("Notp — Setup")
-        .default_width(460)
-        .default_height(300)
+        .title("Notp — Open vault")
+        .default_width(540)
+        .default_height(340)
         .build();
 
     let dialog = Dialog::new();
-    dialog.set_title(Some("Create vault"));
+    dialog.set_title(Some("Open vault"));
     dialog.set_transient_for(Some(&window));
     dialog.set_modal(true);
-    dialog.set_default_size(440, 260);
+    dialog.set_default_size(520, 300);
     dialog.set_resizable(false);
 
     let content = GtkBox::new(Orientation::Vertical, 10);
@@ -63,11 +63,26 @@ fn show_setup_window(application: &Application, store: VaultStore) {
     content.set_margin_top(14);
     content.set_margin_bottom(14);
     let explanation = Label::new(Some(
-        "Choose a master password. It is not stored and cannot be recovered.",
+        "Choose a vault file and enter its master password. A new vault will be created if the file does not exist yet.",
     ));
     explanation.set_wrap(true);
     explanation.set_xalign(0.0);
     content.append(&explanation);
+
+    let path_label = Label::new(Some("Vault file"));
+    path_label.set_xalign(0.0);
+    path_label.set_margin_top(4);
+    content.append(&path_label);
+
+    let path_row = GtkBox::new(Orientation::Horizontal, 8);
+    let path_entry = Entry::new();
+    path_entry.set_text(&initial_path.to_string_lossy());
+    path_entry.set_hexpand(true);
+    path_entry.set_activates_default(true);
+    let browse_button = Button::with_label("Browse\u{2026}");
+    path_row.append(&path_entry);
+    path_row.append(&browse_button);
+    content.append(&path_row);
 
     let password = Entry::new();
     password.set_placeholder_text(Some("Master password (8 characters minimum)"));
@@ -100,22 +115,41 @@ fn show_setup_window(application: &Application, store: VaultStore) {
     action_row.set_margin_top(12);
     action_row.set_margin_bottom(4);
     let cancel_button = Button::with_label("Cancel");
-    let create_button = Button::with_label("Create");
-    create_button.add_css_class("suggested-action");
-    dialog.set_default_widget(Some(&create_button));
+    let action_button = Button::with_label("Open");
+    action_button.add_css_class("suggested-action");
+    dialog.set_default_widget(Some(&action_button));
     action_row.append(&cancel_button);
-    action_row.append(&create_button);
+    action_row.append(&action_button);
     content.append(&action_row);
 
     dialog.content_area().append(&content);
+
+    let update_for_path = {
+        let path_entry = path_entry.clone();
+        let confirmation = confirmation.clone();
+        let action_button = action_button.clone();
+        move || {
+            let path_text = path_entry.text().to_string();
+            let trimmed = path_text.trim();
+            let exists = !trimmed.is_empty() && std::path::Path::new(trimmed).is_file();
+            confirmation.set_visible(!exists);
+            action_button.set_label(if exists { "Unlock" } else { "Create" });
+        }
+    };
+    update_for_path();
+
+    path_entry.connect_changed({
+        let update_for_path = update_for_path.clone();
+        move |_| update_for_path()
+    });
 
     let dialog_for_cancel = dialog.clone();
     cancel_button.connect_clicked(move |_| {
         dialog_for_cancel.response(ResponseType::Cancel);
     });
-    let dialog_for_create = dialog.clone();
-    create_button.connect_clicked(move |_| {
-        dialog_for_create.response(ResponseType::Accept);
+    let dialog_for_action = dialog.clone();
+    action_button.connect_clicked(move |_| {
+        dialog_for_action.response(ResponseType::Accept);
     });
     let dialog_for_escape = dialog.clone();
     let escape_controller = gtk::EventControllerKey::new();
@@ -129,69 +163,158 @@ fn show_setup_window(application: &Application, store: VaultStore) {
     });
     dialog.add_controller(escape_controller);
 
-    let application_for_response = application.clone();
     let application_for_quit = application.clone();
     let application_for_close = application.clone();
+    let application_for_response = application.clone();
     let window_for_close = window.clone();
-    let store_for_response = store.clone();
+    let path_entry_for_response = path_entry.clone();
+    let password_for_response = password.clone();
+    let confirmation_for_response = confirmation.clone();
+    let cancel_button_for_response = cancel_button.clone();
+    let action_button_for_response = action_button.clone();
+    let browse_button_for_response = browse_button.clone();
+    let error_label_for_response = error_label.clone();
+    let spinner_for_response = spinner.clone();
+    let window_to_destroy_for_response = window_to_destroy.clone();
+
     dialog.connect_response(move |dialog, response| {
-        if response == ResponseType::Accept {
-            let password_text = password.text().to_string();
-            let confirmation_text = confirmation.text().to_string();
+        if response != ResponseType::Accept {
+            application_for_quit.quit();
+            return;
+        }
+        let path_text = path_entry_for_response.text().to_string();
+        let trimmed = path_text.trim().to_string();
+        if trimmed.is_empty() {
+            error_label_for_response.set_text("Please choose a vault file");
+            return;
+        }
+        let password_text = password_for_response.text().to_string();
+        let confirmation_text = confirmation_for_response.text().to_string();
+        let will_create = !std::path::Path::new(&trimmed).is_file();
+        if will_create {
             if password_text != confirmation_text {
-                error_label.set_text("Passwords do not match");
+                error_label_for_response.set_text("Passwords do not match");
                 return;
             }
-            password.set_sensitive(false);
-            confirmation.set_sensitive(false);
-            cancel_button.set_sensitive(false);
-            create_button.set_sensitive(false);
-            error_label.set_text("");
-            spinner.set_visible(true);
-            spinner.start();
-
-            let (sender, receiver) =
-                std::sync::mpsc::channel::<anyhow::Result<crate::storage::Vault>>();
-            let store = store_for_response.clone();
-            std::thread::spawn(move || {
-                let _ = sender.send(store.create(&password_text));
-            });
-
-            let dialog_for_poll = dialog.clone();
-            let window_for_poll = window.clone();
-            let application_for_poll = application_for_response.clone();
-            let password_for_poll = password.clone();
-            let confirmation_for_poll = confirmation.clone();
-            let cancel_button_for_poll = cancel_button.clone();
-            let create_button_for_poll = create_button.clone();
-            let error_label_for_poll = error_label.clone();
-            let spinner_for_poll = spinner.clone();
-
-            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                match receiver.try_recv() {
-                    Ok(Ok(vault)) => {
-                        dialog_for_poll.destroy();
-                        window_for_poll.destroy();
-                        show_main_window(&application_for_poll, vault);
-                        glib::ControlFlow::Break
-                    }
-                    Ok(Err(error)) => {
-                        spinner_for_poll.stop();
-                        spinner_for_poll.set_visible(false);
-                        password_for_poll.set_sensitive(true);
-                        confirmation_for_poll.set_sensitive(true);
-                        cancel_button_for_poll.set_sensitive(true);
-                        create_button_for_poll.set_sensitive(true);
-                        error_label_for_poll.set_text(&error.to_string());
-                        glib::ControlFlow::Break
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                    Err(_) => glib::ControlFlow::Break,
-                }
-            });
-        } else {
-            application_for_quit.quit();
         }
+        if password_text.is_empty() {
+            error_label_for_response.set_text("Master password is required");
+            return;
+        }
+
+        let stored_path = std::fs::canonicalize(&trimmed).unwrap_or_else(|_| PathBuf::from(&trimmed));
+        let mut new_settings = AppSettings::default();
+        new_settings.last_vault_path = Some(stored_path);
+        let _ = new_settings.save();
+
+        path_entry_for_response.set_sensitive(false);
+        password_for_response.set_sensitive(false);
+        confirmation_for_response.set_sensitive(false);
+        cancel_button_for_response.set_sensitive(false);
+        action_button_for_response.set_sensitive(false);
+        browse_button_for_response.set_sensitive(false);
+        error_label_for_response.set_text("");
+        spinner_for_response.set_visible(true);
+        spinner_for_response.start();
+
+        let (sender, receiver) = std::sync::mpsc::channel::<anyhow::Result<crate::storage::Vault>>();
+        let path_for_thread = trimmed.clone();
+        let password_for_thread = password_text.clone();
+        let will_create_for_thread = will_create;
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<crate::storage::Vault> {
+                let store = VaultStore::for_path(&path_for_thread)?;
+                if will_create_for_thread {
+                    store.create(&password_for_thread)
+                } else {
+                    store.unlock(&password_for_thread)
+                }
+            })();
+            let _ = sender.send(result);
+        });
+
+        let dialog_for_poll = dialog.clone();
+        let window_for_poll = window.clone();
+        let application_for_poll = application_for_response.clone();
+        let password_for_poll = password_for_response.clone();
+        let confirmation_for_poll = confirmation_for_response.clone();
+        let cancel_button_for_poll = cancel_button_for_response.clone();
+        let action_button_for_poll = action_button_for_response.clone();
+        let browse_button_for_poll = browse_button_for_response.clone();
+        let error_label_for_poll = error_label_for_response.clone();
+        let spinner_for_poll = spinner_for_response.clone();
+        let window_to_destroy_for_poll = window_to_destroy_for_response.clone();
+
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            match receiver.try_recv() {
+                Ok(Ok(vault)) => {
+                    dialog_for_poll.destroy();
+                    window_for_poll.destroy();
+                    if let Some(w) = window_to_destroy_for_poll.as_ref() {
+                        w.destroy();
+                    }
+                    show_main_window(&application_for_poll, vault);
+                    glib::ControlFlow::Break
+                }
+                Ok(Err(error)) => {
+                    spinner_for_poll.stop();
+                    spinner_for_poll.set_visible(false);
+                    password_for_poll.set_sensitive(true);
+                    confirmation_for_poll.set_sensitive(true);
+                    cancel_button_for_poll.set_sensitive(true);
+                    action_button_for_poll.set_sensitive(true);
+                    browse_button_for_poll.set_sensitive(true);
+                    password_for_poll.set_text("");
+                    password_for_poll.grab_focus();
+                    error_label_for_poll.set_text(&error.to_string());
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(_) => glib::ControlFlow::Break,
+            }
+        });
+    });
+
+    let window_for_browse = window_for_close.clone();
+    let path_entry_for_browse = path_entry.clone();
+    let update_for_browse = update_for_path.clone();
+    browse_button.connect_clicked(move |_| {
+        let chooser = gtk::FileChooserNative::new(
+            Some("Select vault file"),
+            Some(&window_for_browse),
+            gtk::FileChooserAction::Open,
+            Some("Select"),
+            Some("Cancel"),
+        );
+        let current = path_entry_for_browse.text().to_string();
+        if !current.trim().is_empty() {
+            if let Some(parent) = std::path::Path::new(&current).parent() {
+                if parent.is_dir() {
+                    let folder = gtk::gio::File::for_path(parent);
+                    let _ = chooser.set_current_folder(Some(&folder));
+                }
+            }
+            let file = gtk::gio::File::for_path(&current);
+            if chooser.set_file(&file).is_err() {
+                if let Some(name) = std::path::Path::new(&current).file_name() {
+                    chooser.set_current_name(&name.to_string_lossy());
+                }
+            }
+        }
+        let path_entry_for_response = path_entry_for_browse.clone();
+        let update_for_response = update_for_browse.clone();
+        chooser.connect_response(move |chooser, response| {
+            if response == ResponseType::Accept {
+                if let Some(file) = chooser.file() {
+                    if let Some(path) = file.path() {
+                        path_entry_for_response.set_text(&path.to_string_lossy());
+                        update_for_response();
+                    }
+                }
+            }
+            chooser.destroy();
+        });
+        chooser.show();
     });
 
     window_for_close.connect_close_request(move |_| {
@@ -200,156 +323,18 @@ fn show_setup_window(application: &Application, store: VaultStore) {
     });
     dialog.present();
     window_for_close.present();
-}
 
-fn show_unlock_window(application: &Application, store: VaultStore, window_to_destroy: Option<ApplicationWindow>) {
-    let window = ApplicationWindow::builder()
-        .application(application)
-        .title("Notp — Unlock")
-        .default_width(460)
-        .default_height(240)
-        .build();
-
-    let dialog = Dialog::new();
-    dialog.set_title(Some("Unlock Notp"));
-    dialog.set_transient_for(Some(&window));
-    dialog.set_modal(true);
-    dialog.set_default_size(440, 190);
-    dialog.set_resizable(false);
-
-    let content = GtkBox::new(Orientation::Vertical, 10);
-    content.set_margin_start(20);
-    content.set_margin_end(20);
-    content.set_margin_top(14);
-    content.set_margin_bottom(14);
-    let explanation = Label::new(Some("Enter your master password to open the vault."));
-    explanation.set_wrap(true);
-    explanation.set_xalign(0.0);
-    content.append(&explanation);
-
-    let password = Entry::new();
-    password.set_placeholder_text(Some("Master password"));
-    password.set_visibility(false);
-    password.set_input_purpose(gtk::InputPurpose::Password);
-    password.set_activates_default(true);
-    content.append(&password);
-    password.grab_focus();
-
-    let error_label = Label::new(None);
-    error_label.set_xalign(0.0);
-    error_label.add_css_class("error");
-    content.append(&error_label);
-
-    let spinner = Spinner::new();
-    spinner.set_halign(gtk::Align::Center);
-    spinner.set_margin_top(4);
-    spinner.set_visible(false);
-    content.append(&spinner);
-
-    let action_row = GtkBox::new(Orientation::Horizontal, 8);
-    action_row.set_halign(gtk::Align::End);
-    action_row.set_margin_top(12);
-    action_row.set_margin_bottom(4);
-    let cancel_button = Button::with_label("Cancel");
-    let unlock_button = Button::with_label("Unlock");
-    unlock_button.add_css_class("suggested-action");
-    dialog.set_default_widget(Some(&unlock_button));
-    action_row.append(&cancel_button);
-    action_row.append(&unlock_button);
-    content.append(&action_row);
-
-    dialog.content_area().append(&content);
-
-    let dialog_for_cancel = dialog.clone();
-    cancel_button.connect_clicked(move |_| {
-        dialog_for_cancel.response(ResponseType::Cancel);
-    });
-    let dialog_for_unlock = dialog.clone();
-    unlock_button.connect_clicked(move |_| {
-        dialog_for_unlock.response(ResponseType::Accept);
-    });
-    let dialog_for_escape = dialog.clone();
-    let escape_controller = gtk::EventControllerKey::new();
-    escape_controller.connect_key_pressed(move |_, key, _, _| {
-        if key == gtk::gdk::Key::Escape {
-            dialog_for_escape.response(ResponseType::Cancel);
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
-    });
-    dialog.add_controller(escape_controller);
-
-    let application_for_response = application.clone();
-    let application_for_quit = application.clone();
-    let application_for_close = application.clone();
-    let window_for_close = window.clone();
-    let store_for_response = store.clone();
-    dialog.connect_response(move |dialog, response| {
-        if response == ResponseType::Accept {
-            let password_text = password.text().to_string();
-            password.set_sensitive(false);
-            cancel_button.set_sensitive(false);
-            unlock_button.set_sensitive(false);
-            error_label.set_text("");
-            spinner.set_visible(true);
-            spinner.start();
-
-            let (sender, receiver) =
-                std::sync::mpsc::channel::<anyhow::Result<crate::storage::Vault>>();
-            let store = store_for_response.clone();
-            std::thread::spawn(move || {
-                let _ = sender.send(store.unlock(&password_text));
-            });
-
-            let dialog_for_poll = dialog.clone();
-            let window_for_poll = window.clone();
-            let application_for_poll = application_for_response.clone();
-            let password_for_poll = password.clone();
-            let cancel_button_for_poll = cancel_button.clone();
-            let unlock_button_for_poll = unlock_button.clone();
-            let error_label_for_poll = error_label.clone();
-            let spinner_for_poll = spinner.clone();
-
-            let window_to_destroy_for_poll = window_to_destroy.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                match receiver.try_recv() {
-                    Ok(Ok(vault)) => {
-                        dialog_for_poll.destroy();
-                        window_for_poll.destroy();
-                        if let Some(w) = window_to_destroy_for_poll.as_ref() {
-                            w.destroy();
-                        }
-                        show_main_window(&application_for_poll, vault);
-                        glib::ControlFlow::Break
-                    }
-                    Ok(Err(_)) => {
-                        spinner_for_poll.stop();
-                        spinner_for_poll.set_visible(false);
-                        password_for_poll.set_sensitive(true);
-                        cancel_button_for_poll.set_sensitive(true);
-                        unlock_button_for_poll.set_sensitive(true);
-                        password_for_poll.set_text("");
-                        password_for_poll.grab_focus();
-                        error_label_for_poll
-                            .set_text("Incorrect password or corrupted vault");
-                        glib::ControlFlow::Break
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                    Err(_) => glib::ControlFlow::Break,
-                }
-            });
-        } else {
-            application_for_quit.quit();
-        }
-    });
-
-    window_for_close.connect_close_request(move |_| {
-        application_for_close.quit();
-        glib::Propagation::Proceed
-    });
-    dialog.present();
-    window_for_close.present();
+    if !has_saved_path {
+        let auto_browse = Rc::new(Cell::new(false));
+        let auto_browse_for_map = auto_browse.clone();
+        let browse_for_map = browse_button.clone();
+        window_for_close.connect_map(move |_| {
+            if !auto_browse_for_map.get() {
+                auto_browse_for_map.set(true);
+                browse_for_map.emit_clicked();
+            }
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -836,14 +821,9 @@ fn show_main_window(application: &Application, vault: Vault) {
     let lock_action: Rc<dyn Fn()> = {
         let application = application.clone();
         let window = window.clone();
-        let store = vault.borrow().store().clone();
         Rc::new(move || {
             window.set_visible(false);
-            show_unlock_window(
-                &application,
-                store.clone(),
-                Some(window.clone()),
-            );
+            show_load_window(&application, Some(window.clone()));
         })
     };
 
@@ -1216,6 +1196,7 @@ fn show_error(parent: &ApplicationWindow, title: &str, message: &str) {
     dialog.present();
 }
 
+#[allow(dead_code)]
 fn show_application_error(application: &Application, title: &str, message: &str) {
     let application = application.clone();
     let window = ApplicationWindow::builder()

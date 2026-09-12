@@ -154,6 +154,7 @@ impl Vault {
     }
 
     #[cfg(feature = "gtk")]
+    #[allow(dead_code)]
     pub fn store(&self) -> &VaultStore {
         &self.store
     }
@@ -198,19 +199,17 @@ pub struct VaultStore {
 }
 
 impl VaultStore {
-    #[cfg(feature = "gtk")]
-    pub fn new() -> Result<Self> {
-        let data_dir = dirs::data_dir().context("Unable to determine the data directory")?;
-        let directory = data_dir.join("notp");
-        fs::create_dir_all(&directory).context("Unable to create the data directory")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    pub fn for_path(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).context("Unable to create the vault directory")?;
         }
-        Ok(Self {
-            path: directory.join("vault.notp"),
-        })
+        Ok(Self { path })
+    }
+
+    pub fn default_path() -> Result<PathBuf> {
+        let data_dir = dirs::data_dir().context("Unable to determine the data directory")?;
+        Ok(data_dir.join("notp").join("vault.notp"))
     }
 
     #[cfg(test)]

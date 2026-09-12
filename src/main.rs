@@ -2,6 +2,7 @@ mod camera;
 mod crypto;
 mod otp;
 mod qr_import;
+mod settings;
 mod storage;
 #[cfg(feature = "gtk")]
 mod ui;
