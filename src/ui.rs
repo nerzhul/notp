@@ -26,6 +26,10 @@ const APPLICATION_ID: &str = "com.nerzhul.notp";
 
 pub fn run() {
     gtk::init().expect("Unable to initialize GTK");
+    load_app_css();
+    if let Some(settings) = AppSettings::load().ok() {
+        apply_theme(&settings.theme);
+    }
     let application = Application::builder()
         .application_id(APPLICATION_ID)
         .build();
@@ -2094,23 +2098,21 @@ fn edit_selected(context: &RenderContext, window: &ApplicationWindow, id: Uuid) 
     });
 }
 
-fn preferences_dialog<F>(parent: &ApplicationWindow, current: AppSettings, on_apply: F)
+fn preferences_dialog<F>(parent: &ApplicationWindow, current: AppSettings, on_change: F)
 where
-    F: FnOnce(AppSettings) + 'static,
+    F: Fn(AppSettings) + 'static,
 {
     let parent_for_error = parent.clone();
     let dialog = Dialog::with_buttons(
         Some("Preferences"),
         Some(parent),
         DialogFlags::MODAL,
-        &[
-            ("Cancel", ResponseType::Cancel),
-            ("Apply", ResponseType::Accept),
-        ],
+        &[("Close", ResponseType::Close)],
     );
     dialog.set_default_size(500, 280);
-    if let Some(button) = dialog.widget_for_response(ResponseType::Accept) {
+    if let Some(button) = dialog.widget_for_response(ResponseType::Close) {
         button.add_css_class("suggested-action");
+        button.set_margin_end(8);
         dialog.set_default_widget(Some(&button));
     }
 
@@ -2190,19 +2192,43 @@ where
     container.append(&grid);
     dialog.content_area().append(&container);
 
-    dialog.run_async(move |dialog, response| {
-        if response == ResponseType::Accept {
+    let on_change: Rc<dyn Fn(AppSettings)> = Rc::new(on_change);
+    let build_settings = {
+        let theme_combo = theme_combo.clone();
+        let auto_lock = auto_lock.clone();
+        let clipboard_clear = clipboard_clear.clone();
+        Rc::new(move || {
             let theme = match theme_combo.active_id().as_deref() {
                 Some("light") => Theme::Light,
                 Some("dark") => Theme::Dark,
                 _ => Theme::System,
             };
-            let mut updated = current;
+            let mut updated = current.clone();
             updated.auto_lock_seconds = auto_lock.value() as u64;
             updated.clipboard_clear_seconds = clipboard_clear.value() as u64;
             updated.theme = theme;
-            on_apply(updated.normalized());
-        }
+            updated.normalized()
+        })
+    };
+    let fire = {
+        let build_settings = build_settings.clone();
+        let on_change = on_change.clone();
+        Rc::new(move || on_change(build_settings()))
+    };
+    auto_lock.connect_value_changed({
+        let fire = fire.clone();
+        move |_| fire()
+    });
+    clipboard_clear.connect_value_changed({
+        let fire = fire.clone();
+        move |_| fire()
+    });
+    theme_combo.connect_changed({
+        let fire = fire.clone();
+        move |_| fire()
+    });
+
+    dialog.run_async(move |dialog, _response| {
         dialog.close();
     });
     let _ = parent_for_error;
@@ -2286,13 +2312,55 @@ where
     });
 }
 
-fn apply_theme(theme: &Theme) {
-    if let Some(settings) = gtk::Settings::default() {
-        settings.set_property("gtk-application-prefer-dark-theme", matches!(theme, Theme::Dark));
+fn system_prefers_dark() -> bool {
+    let settings = gtk::gio::Settings::new("org.gnome.desktop.interface");
+    settings.string("color-scheme") == "prefer-dark"
+}
+
+fn strip_dark_suffix(name: &str) -> &str {
+    if let Some(base) = name.strip_suffix("-dark") {
+        base
+    } else {
+        name
     }
-    let provider = CssProvider::new();
-    provider.load_from_data(NOTP_CSS);
+}
+
+fn base_theme_name() -> Option<String> {
+    gtk::Settings::default()
+        .and_then(|settings| settings.gtk_theme_name())
+        .map(|name| strip_dark_suffix(name.as_str()).to_string())
+}
+
+fn apply_theme(theme: &Theme) {
+    let prefer_dark = match theme {
+        Theme::Dark => true,
+        Theme::Light => false,
+        Theme::System => system_prefers_dark(),
+    };
+    if let Some(settings) = gtk::Settings::default() {
+        settings.set_gtk_application_prefer_dark_theme(prefer_dark);
+        match theme {
+            Theme::System => {
+                settings.set_gtk_theme_name(None::<&str>);
+            }
+            _ => {
+                if let Some(base) = base_theme_name() {
+                    let variant = if prefer_dark {
+                        format!("{base}-dark")
+                    } else {
+                        base
+                    };
+                    settings.set_gtk_theme_name(Some(&variant));
+                }
+            }
+        }
+    }
+}
+
+fn load_app_css() {
     if let Some(display) = gtk::gdk::Display::default() {
+        let provider = CssProvider::new();
+        provider.load_from_data(NOTP_CSS);
         gtk::style_context_add_provider_for_display(
             &display,
             &provider,
