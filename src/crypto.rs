@@ -125,9 +125,13 @@ fn derive_key(
 ) -> Result<[u8; KEY_LENGTH]> {
     let argon2 = kdf.argon2()?;
     let mut key = [0_u8; KEY_LENGTH];
-    argon2
-        .hash_password_into(password.as_bytes(), salt, &mut key)
-        .map_err(|error| anyhow::anyhow!("Failed to derive the master key: {}", error))?;
+    if let Err(error) = argon2.hash_password_into(password.as_bytes(), salt, &mut key) {
+        // Argon2 may have left a partial key buffer behind on failure; wipe it
+        // before propagating so the partial secret material does not linger on
+        // the stack or in heap copies of the array.
+        key.zeroize();
+        return Err(anyhow::anyhow!("Failed to derive the master key: {}", error));
+    }
     Ok(key)
 }
 

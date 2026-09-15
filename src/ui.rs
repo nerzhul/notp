@@ -4,7 +4,7 @@ use crate::settings::{
     AppSettings, Theme, MAX_AUTO_LOCK_SECONDS, MAX_CLIPBOARD_CLEAR_SECONDS, MIN_AUTO_LOCK_SECONDS,
     MIN_CLIPBOARD_CLEAR_SECONDS,
 };
-use crate::storage::{Account, Vault, VaultStore};
+use crate::storage::{Account, Vault, VaultStore, CURRENT_VAULT_VERSION};
 use gtk::gdk::{ContentProvider, DragAction};
 use gtk::glib;
 use gtk::prelude::*;
@@ -13,7 +13,7 @@ use gtk::{
     ComboBoxText, CssProvider, Dialog, DialogFlags, DragSource, DrawingArea, DropTarget, Entry,
     EventControllerKey, Grid, HeaderBar, Label, ListBox, ListBoxRow, MenuButton, MessageDialog,
     Orientation, Overlay, Paned, Popover, ResponseType, ScrolledWindow, SelectionMode,
-    SpinButton, Spinner, Stack, WidgetPaintable,
+    Separator, SpinButton, Spinner, Stack, WidgetPaintable,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -348,6 +348,7 @@ struct DetailWidgets {
     account: Label,
     code: Label,
     countdown: CountdownSpinner,
+    metadata: Label,
     copy: Button,
     edit: Button,
     remove: Button,
@@ -463,6 +464,8 @@ struct RenderContext {
     filter: Rc<RefCell<String>>,
     toast: Rc<RefCell<Option<Label>>>,
     toast_overlay: Rc<RefCell<Option<GtkBox>>>,
+    last_counted_period: Rc<RefCell<HashMap<Uuid, u64>>>,
+    vault_dirty: Rc<Cell<bool>>,
 }
 
 fn show_main_window(application: &Application, vault: Vault) {
@@ -521,14 +524,13 @@ fn show_main_window(application: &Application, vault: Vault) {
     menu_box.set_margin_bottom(4);
     menu_box.set_margin_start(4);
     menu_box.set_margin_end(4);
-    let preferences_button = Button::with_label("Preferences\u{2026}");
-    preferences_button.set_has_frame(false);
-    preferences_button.set_halign(gtk::Align::Fill);
-    let change_password_button = Button::with_label("Change master password\u{2026}");
-    change_password_button.set_has_frame(false);
-    change_password_button.set_halign(gtk::Align::Fill);
+    let preferences_button = menu_button("Preferences\u{2026}");
+    let change_password_button = menu_button("Change master password\u{2026}");
+    let about_button = menu_button("About\u{2026}");
     menu_box.append(&preferences_button);
     menu_box.append(&change_password_button);
+    menu_box.append(&Separator::new(Orientation::Horizontal));
+    menu_box.append(&about_button);
     menu_popover.set_child(Some(&menu_box));
 
     let menu_button = MenuButton::new();
@@ -593,6 +595,11 @@ fn show_main_window(application: &Application, vault: Vault) {
     detail_content.append(&detail_code);
     let detail_countdown = CountdownSpinner::new();
     detail_content.append(&*detail_countdown);
+    let detail_metadata = Label::new(None);
+    detail_metadata.set_xalign(0.0);
+    detail_metadata.add_css_class("dim-label");
+    detail_metadata.set_wrap(true);
+    detail_content.append(&detail_metadata);
 
     let action_box = GtkBox::new(Orientation::Horizontal, 8);
     let copy_button = Button::with_label("Copy code");
@@ -647,6 +654,7 @@ fn show_main_window(application: &Application, vault: Vault) {
         account: detail_account,
         code: detail_code,
         countdown: detail_countdown,
+        metadata: detail_metadata,
         copy: copy_button,
         edit: edit_button,
         remove: remove_button,
@@ -661,6 +669,7 @@ fn show_main_window(application: &Application, vault: Vault) {
             account: detail.account.clone(),
             code: detail.code.clone(),
             countdown: detail.countdown.clone(),
+            metadata: detail.metadata.clone(),
             copy: detail.copy.clone(),
             edit: detail.edit.clone(),
             remove: detail.remove.clone(),
@@ -669,6 +678,8 @@ fn show_main_window(application: &Application, vault: Vault) {
         filter: filter.clone(),
         toast: toast.clone(),
         toast_overlay: toast_overlay.clone(),
+        last_counted_period: Rc::new(RefCell::new(HashMap::new())),
+        vault_dirty: Rc::new(Cell::new(false)),
     };
     *toast.borrow_mut() = Some(toast_label);
     *toast_overlay.borrow_mut() = Some(toast_box);
@@ -1091,6 +1102,13 @@ fn show_main_window(application: &Application, vault: Vault) {
         });
     });
 
+    let popover_for_about = menu_popover.clone();
+    let window_for_about = window.clone();
+    about_button.connect_clicked(move |_| {
+        popover_for_about.popdown();
+        show_about_dialog(&window_for_about);
+    });
+
     // --- Keyboard shortcuts -------------------------------------------------
     let key_controller = EventControllerKey::new();
     let context_for_keys = context.clone();
@@ -1337,6 +1355,7 @@ fn show_selected(context: &RenderContext) {
         context.detail.copy.set_sensitive(false);
         context.detail.edit.set_sensitive(false);
         context.detail.remove.set_sensitive(false);
+        context.detail.metadata.set_text("");
         return;
     };
     let vault = context.vault.borrow();
@@ -1347,14 +1366,53 @@ fn show_selected(context: &RenderContext) {
         context.detail.copy.set_sensitive(false);
         context.detail.edit.set_sensitive(false);
         context.detail.remove.set_sensitive(false);
+        context.detail.metadata.set_text("");
         return;
     };
     context.detail.issuer.set_text(&account.issuer);
     context.detail.account.set_text(&account.name);
+    context.detail.metadata.set_text(&format_metadata(account.added_at, account.last_used_at, account.use_count));
     context.detail.stack.set_visible_child_name("content");
     context.detail.copy.set_sensitive(true);
     context.detail.edit.set_sensitive(true);
     context.detail.remove.set_sensitive(true);
+}
+
+fn format_metadata(added_at: u64, last_used_at: Option<u64>, use_count: u64) -> String {
+    let mut parts = Vec::new();
+    if added_at > 0 {
+        parts.push(format!("Added {}", format_relative(added_at, current_timestamp())));
+    }
+    match last_used_at {
+        Some(timestamp) => parts.push(format!(
+            "Last used {} — {} {}",
+            format_relative(timestamp, current_timestamp()),
+            use_count,
+            if use_count <= 1 { "time" } else { "times" }
+        )),
+        None => parts.push(format!("Not used yet — {} use{}", use_count, if use_count <= 1 { "" } else { "s" })),
+    }
+    parts.join("\n")
+}
+
+fn format_relative(then: u64, now: u64) -> String {
+    if then > now {
+        return "in the future".to_string();
+    }
+    let delta = now - then;
+    if delta < 60 {
+        format!("{} seconds ago", delta)
+    } else if delta < 3_600 {
+        format!("{} minutes ago", delta / 60)
+    } else if delta < 86_400 {
+        format!("{} hours ago", delta / 3_600)
+    } else if delta < 86_400 * 30 {
+        format!("{} days ago", delta / 86_400)
+    } else if delta < 86_400 * 365 {
+        format!("{} months ago", delta / (86_400 * 30))
+    } else {
+        format!("{} years ago", delta / (86_400 * 365))
+    }
 }
 
 fn refresh_codes(context: &RenderContext) {
@@ -1385,6 +1443,11 @@ fn refresh_codes(context: &RenderContext) {
             )
             .unwrap_or_else(|_| "------".to_string());
             context.detail.code.set_text(&code);
+            context.detail.metadata.set_text(&format_metadata(
+                account.added_at,
+                account.last_used_at,
+                account.use_count,
+            ));
             let remaining = remaining_seconds(timestamp, account.period);
             let period = account.period;
             let fraction = if period > 0 {
@@ -1393,6 +1456,36 @@ fn refresh_codes(context: &RenderContext) {
                 0.0
             };
             context.detail.countdown.update(fraction, remaining);
+
+            // Bump the usage counter at most once per TOTP period when the
+            // code is shown in the detail view, so the metric does not race
+            // with the per-second refresh loop.
+            let current_period = timestamp / u64::from(period.max(1));
+            let mut counted = context.last_counted_period.borrow_mut();
+            let already_counted = counted.get(&id).copied() == Some(current_period);
+            if !already_counted {
+                counted.insert(id, current_period);
+                drop(counted);
+                drop(vault);
+                let mut vault_mut = context.vault.borrow_mut();
+                if let Some(slot) = vault_mut
+                    .data_mut()
+                    .accounts
+                    .iter_mut()
+                    .find(|slot| slot.id == id)
+                {
+                    slot.record_use();
+                    context.vault_dirty.set(true);
+                }
+            }
+        }
+    }
+    // Persist usage bumps after refreshing the visible state so we save at
+    // most once per tick rather than after every interaction.
+    if context.vault_dirty.get() {
+        context.vault_dirty.set(false);
+        if let Err(error) = context.vault.borrow().save() {
+            eprintln!("notp: failed to persist usage metadata: {error}");
         }
     }
 }
@@ -1511,6 +1604,26 @@ fn add_field<T: IsA<gtk::Widget>>(grid: &Grid, label: &Label, field: &T, row: i3
     grid.attach(field, 1, row, 1, 1);
 }
 
+/// Build a frameless, full-width menu item with its label left-aligned.
+/// `Button::with_label` defaults to centered text, which looks wrong inside
+/// a popover; reaching for the internal Label and pinning its `xalign` is
+/// the documented GTK4 way to fix that.
+fn menu_button(text: &str) -> Button {
+    let button = Button::with_label(text);
+    button.set_has_frame(false);
+    button.set_halign(gtk::Align::Fill);
+    if let Some(child) = button.child() {
+        if let Ok(label) = child.downcast::<Label>() {
+            label.set_xalign(0.0);
+            label.set_margin_start(6);
+            label.set_margin_end(6);
+            label.set_margin_top(4);
+            label.set_margin_bottom(4);
+        }
+    }
+    button
+}
+
 fn confirm<F>(parent: &ApplicationWindow, title: &str, message: &str, on_confirm: F)
 where
     F: FnOnce() + 'static,
@@ -1600,6 +1713,67 @@ fn show_error(parent: &ApplicationWindow, title: &str, message: &str) {
     dialog.present();
 }
 
+fn show_about_dialog(parent: &ApplicationWindow) {
+    // Plain `MessageDialog::builder()` would inherit the parent window's
+    // title in its header bar; using a standalone `Dialog` keeps the chrome
+    // tight and makes room for a readable, multi-line description.
+    let dialog = Dialog::with_buttons(
+        Some("About Notp"),
+        Some(parent),
+        DialogFlags::MODAL,
+        &[("Close", ResponseType::Close)],
+    );
+    dialog.set_default_size(420, 220);
+    if let Some(button) = dialog.widget_for_response(ResponseType::Close) {
+        dialog.set_default_widget(Some(&button));
+    }
+
+    // Padding is set on each Label individually because `Dialog::content_area()`
+    // drops its child margins in some Adwaita configurations — applying the
+    // margin on the box alone would leave the labels flush against the edge.
+    let content = GtkBox::new(Orientation::Vertical, 6);
+
+    let title = Label::new(Some("Notp"));
+    title.add_css_class("title-1");
+    title.set_xalign(0.0);
+    title.set_margin_start(24);
+    title.set_margin_end(24);
+    title.set_margin_top(18);
+    content.append(&title);
+
+    let tagline = Label::new(Some(
+        "Native TOTP authenticator with an encrypted local vault.",
+    ));
+    tagline.set_xalign(0.0);
+    tagline.set_wrap(true);
+    tagline.add_css_class("dim-label");
+    tagline.set_margin_start(24);
+    tagline.set_margin_end(24);
+    content.append(&tagline);
+
+    let info = Label::new(None);
+    info.set_xalign(0.0);
+    info.set_wrap(true);
+    info.set_selectable(true);
+    info.set_margin_start(24);
+    info.set_margin_end(24);
+    info.set_margin_top(10);
+    info.set_margin_bottom(18);
+    info.set_markup(&format!(
+        "<tt>Version  {version}\nGit tag  {tag}\nStorage  v{storage}</tt>",
+        version = env!("CARGO_PKG_VERSION"),
+        tag = env!("NOTP_GIT_TAG"),
+        storage = CURRENT_VAULT_VERSION,
+    ));
+    content.append(&info);
+
+    dialog.content_area().append(&content);
+    dialog.connect_response(move |dialog, _| {
+        dialog.close();
+    });
+    dialog.present();
+}
+
 #[allow(dead_code)]
 fn show_application_error(application: &Application, title: &str, message: &str) {
     let application = application.clone();
@@ -1670,6 +1844,27 @@ fn copy_current_code(context: &RenderContext, window: &ApplicationWindow, target
             copy_to_clipboard(window, &secret);
             register_clipboard_auto_clear(window, secret);
         }
+    }
+    if matches!(target, ClipboardTarget::Code) {
+        // Record the user-initiated use immediately and refresh the detail
+        // panel so the metadata label updates without waiting for the next
+        // tick of the periodic refresh loop.
+        {
+            let mut vault = context.vault.borrow_mut();
+            if let Some(account) = vault
+                .data_mut()
+                .accounts
+                .iter_mut()
+                .find(|account| account.id == id)
+            {
+                account.record_use();
+            }
+        }
+        if let Err(error) = context.vault.borrow().save() {
+            eprintln!("notp: failed to persist usage metadata: {error}");
+        }
+        show_selected(context);
+        refresh_codes(context);
     }
     let _ = (issuer, name);
 }
@@ -1864,13 +2059,17 @@ fn edit_selected(context: &RenderContext, window: &ApplicationWindow, id: Uuid) 
     let context_for_save = context.clone();
     let window_for_save = window.clone();
     add_account_dialog(window, Some(params), move |account| {
-        let Some(account) = account else {
+        let Some(mut account) = account else {
             return;
         };
         let result = {
             let mut vault = context_for_save.vault.borrow_mut();
             let data = vault.data_mut();
             if let Some(position) = data.accounts.iter().position(|existing| existing.id == id) {
+                // Preserve the stable identity and usage history when
+                // overwriting in place so editing an entry does not change
+                // its id (used for the selection) or reset its counters.
+                account.inherit_identity_from(&data.accounts[position]);
                 data.accounts[position] = account;
             } else {
                 if let Err(error) = data.add_account(account) {

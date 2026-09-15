@@ -10,6 +10,11 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 
 const SALT_LENGTH: usize = 16;
+/// Current on-disk VaultData schema version. Phase 2.3 added per-entry usage
+/// metadata (added_at / last_used_at / use_count), which is not representable
+/// in bincode without a versioned layout; the bump forces a one-shot upgrade
+/// of every existing v1 vault on next unlock.
+pub const CURRENT_VAULT_VERSION: u32 = 2;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Account {
@@ -20,6 +25,12 @@ pub struct Account {
     pub digits: u8,
     pub period: u32,
     pub algorithm: Algorithm,
+    #[serde(default)]
+    pub added_at: u64,
+    #[serde(default)]
+    pub last_used_at: Option<u64>,
+    #[serde(default)]
+    pub use_count: u64,
 }
 
 impl Account {
@@ -48,6 +59,9 @@ impl Account {
             digits,
             period,
             algorithm,
+            added_at: current_timestamp(),
+            last_used_at: None,
+            use_count: 0,
         };
         account.validate()?;
         Ok(account)
@@ -56,6 +70,25 @@ impl Account {
     #[cfg(feature = "gtk")]
     pub fn secret(&self) -> &str {
         &self.secret
+    }
+
+    /// Record that the account was just used (code copied or displayed in the
+    /// detail view). Updates `last_used_at` and bumps `use_count`. Callers are
+    /// responsible for debouncing so a single visible period is not counted
+    /// multiple times in a row.
+    pub fn record_use(&mut self) {
+        self.use_count = self.use_count.saturating_add(1);
+        self.last_used_at = Some(current_timestamp());
+    }
+
+    /// Copy the stable identity and usage metadata from another account.
+    /// Used by the edit flow so that re-importing the same entry does not
+    /// change its id (used for selection persistence) or wipe its history.
+    pub fn inherit_identity_from(&mut self, other: &Account) {
+        self.id = other.id;
+        self.added_at = other.added_at;
+        self.last_used_at = other.last_used_at;
+        self.use_count = other.use_count;
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -87,11 +120,68 @@ pub struct VaultData {
     pub accounts: Vec<Account>,
 }
 
+/// On-disk layout of an account prior to phase 2.3 (no usage metadata).
+/// Kept around as a deserialization-only schema for the v1 → v2 migration
+/// triggered by `VaultStore::unlock`. Must mirror the historical field set
+/// exactly — adding fields here breaks compat with existing vaults.
+#[derive(Deserialize, Serialize)]
+struct AccountV1 {
+    pub id: Uuid,
+    pub issuer: String,
+    pub name: String,
+    secret: String,
+    pub digits: u8,
+    pub period: u32,
+    pub algorithm: Algorithm,
+}
+
+/// On-disk layout of `VaultData` prior to phase 2.3. Mirrors the historical
+/// field set (no per-entry usage metadata). Used only by the v1 → v2
+/// migration path.
+#[derive(Deserialize, Serialize)]
+#[allow(dead_code)]
+struct VaultDataV1 {
+    pub version: u32,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub accounts: Vec<AccountV1>,
+}
+
+impl From<VaultDataV1> for VaultData {
+    fn from(v1: VaultDataV1) -> Self {
+        Self {
+            version: CURRENT_VAULT_VERSION,
+            created_at: v1.created_at,
+            updated_at: v1.updated_at,
+            accounts: v1
+                .accounts
+                .into_iter()
+                .map(|account| Account {
+                    id: account.id,
+                    issuer: account.issuer,
+                    name: account.name,
+                    secret: account.secret,
+                    digits: account.digits,
+                    period: account.period,
+                    algorithm: account.algorithm,
+                    // Migrated entries have no recorded add date. Use the
+                    // vault creation timestamp as a best-effort hint; the UI
+                    // hides the field when it is exactly zero, and downstream
+                    // bumps can refine this default.
+                    added_at: v1.created_at,
+                    last_used_at: None,
+                    use_count: 0,
+                })
+                .collect(),
+        }
+    }
+}
+
 impl VaultData {
     pub fn new() -> Self {
         let timestamp = current_timestamp();
         Self {
-            version: 1,
+            version: CURRENT_VAULT_VERSION,
             created_at: timestamp,
             updated_at: timestamp,
             accounts: Vec::new(),
@@ -99,8 +189,12 @@ impl VaultData {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.version != 1 {
-            bail!("Unsupported data version");
+        if self.version != CURRENT_VAULT_VERSION {
+            bail!(
+                "Unsupported data version {} (expected {})",
+                self.version,
+                CURRENT_VAULT_VERSION
+            );
         }
         for account in &self.accounts {
             account.validate()?;
@@ -345,15 +439,49 @@ impl VaultStore {
             .context("Vault is already locked by another instance")?;
         let encoded = fs::read(&self.path).context("Unable to read the vault")?;
         let (key, salt, mut plaintext) = crypto::open_with_key_and_salt(&encoded, password)?;
-        let data: VaultData =
-            match bincode::deserialize(&plaintext).context("Vault is incompatible or corrupted") {
-                Ok(data) => data,
-                Err(error) => {
-                    plaintext.zeroize();
-                    return Err(error);
-                }
-            };
-        plaintext.zeroize();
+        // bincode is not self-describing: `#[serde(default)]` is silently
+        // ignored on a shorter payload, which would otherwise break every
+        // vault written before phase 2.3. Peek the schema version byte and
+        // route to the matching decoder; missing entries in a legacy layout
+        // are filled by the per-version migration below.
+        let on_disk_version = peek_varint_u32(&plaintext)
+            .context("Unable to read the vault schema version")?;
+        let data: VaultData = match on_disk_version {
+            1 => {
+                let v1: VaultDataV1 = match bincode::deserialize(&plaintext)
+                    .context("Unable to decode a v1 vault") {
+                    Ok(v1) => v1,
+                    Err(error) => {
+                        plaintext.zeroize();
+                        return Err(error);
+                    }
+                };
+                plaintext.zeroize();
+                let mut data: VaultData = v1.into();
+                data.updated_at = current_timestamp();
+                data
+            }
+            CURRENT_VAULT_VERSION => {
+                let data = match bincode::deserialize(&plaintext)
+                    .context("Vault is incompatible or corrupted") {
+                    Ok(data) => data,
+                    Err(error) => {
+                        plaintext.zeroize();
+                        return Err(error);
+                    }
+                };
+                plaintext.zeroize();
+                data
+            }
+            other => {
+                plaintext.zeroize();
+                bail!(
+                    "Unsupported vault data version {} (expected {} or 1)",
+                    other,
+                    CURRENT_VAULT_VERSION
+                );
+            }
+        };
         data.validate().context("Vault data is invalid")?;
         Ok(Vault {
             data,
@@ -504,10 +632,213 @@ fn current_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+/// Decode the leading unsigned LEB128 varint (as written by `bincode`'s
+/// default config) without consuming the input. Used by `VaultStore::unlock`
+/// to choose the matching schema decoder for the on-disk `VaultData`.
+fn peek_varint_u32(bytes: &[u8]) -> Option<u32> {
+    let mut result: u32 = 0;
+    let mut shift: u32 = 0;
+    for &byte in bytes.iter().take(5) {
+        result |= u32::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(result);
+        }
+        shift += 7;
+        if shift >= 32 {
+            return None;
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn peek_varint_u32_handles_small_values() {
+        // bincode's default config encodes a u32 ≤ 0x7f as a single byte; our
+        // current versions (1 and 2) live in that range, so the peek must
+        // round-trip them without consuming the trailing bytes.
+        assert_eq!(peek_varint_u32(&[0x01, 0xff]), Some(1));
+        assert_eq!(peek_varint_u32(&[0x02, 0x00, 0xab]), Some(2));
+        assert_eq!(peek_varint_u32(&[]), None);
+        // 5 bytes with the continuation bit still set → truncated varint.
+        assert_eq!(peek_varint_u32(&[0x80; 5]), None);
+    }
+
+    #[test]
+    fn unlocks_legacy_v1_vault_and_migrates() {
+        // Phase 2.3 retrocompat: a vault written by a build prior to the
+        // usage-metadata fields must still unlock. The in-memory data must
+        // be tagged v2, every account must carry zeroed metadata, and a
+        // subsequent save must round-trip through the v2 decoder.
+        let directory = tempdir().unwrap();
+        let vault_path = directory.path().join("vault.notp");
+        let store = VaultStore::from_path(vault_path.clone());
+
+        // Hand-craft a v1 VaultData and seal it with the production envelope.
+        let legacy = VaultDataV1 {
+            version: 1,
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_500,
+            accounts: vec![
+                AccountV1 {
+                    id: Uuid::new_v4(),
+                    issuer: "Legacy".to_string(),
+                    name: "alice@example.com".to_string(),
+                    secret: "JBSWY3DPEHPK3PXP".to_string(),
+                    digits: 6,
+                    period: 30,
+                    algorithm: Algorithm::Sha1,
+                },
+                AccountV1 {
+                    id: Uuid::new_v4(),
+                    issuer: "Legacy".to_string(),
+                    name: "bob@example.com".to_string(),
+                    secret: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".to_string(),
+                    digits: 8,
+                    period: 60,
+                    algorithm: Algorithm::Sha256,
+                },
+            ],
+        };
+        let plaintext = bincode::serialize(&legacy).unwrap();
+        let mut salt = [0_u8; SALT_LENGTH];
+        OsRng.fill_bytes(&mut salt);
+        let key = crypto::derive_production_key("legacy master phrase", &salt).unwrap();
+        let encoded = crypto::seal_with_key_and_salt(&plaintext, &key, &salt).unwrap();
+        std::fs::write(&vault_path, &encoded).unwrap();
+
+        let vault = store
+            .unlock("legacy master phrase")
+            .expect("v1 vault must unlock");
+        assert_eq!(vault.data().version, CURRENT_VAULT_VERSION);
+        assert_eq!(vault.data().created_at, 1_700_000_000);
+        assert_eq!(vault.data().accounts.len(), 2);
+        assert_eq!(vault.data().accounts[0].issuer, "Legacy");
+        assert_eq!(vault.data().accounts[0].name, "alice@example.com");
+        assert_eq!(vault.data().accounts[0].digits, 6);
+        assert_eq!(vault.data().accounts[0].period, 30);
+        assert_eq!(vault.data().accounts[0].algorithm, Algorithm::Sha1);
+        // Migrated entries have no recorded history.
+        assert_eq!(vault.data().accounts[0].last_used_at, None);
+        assert_eq!(vault.data().accounts[0].use_count, 0);
+        assert_eq!(
+            vault.data().accounts[0].added_at, 1_700_000_000,
+            "migrated entries inherit the vault creation timestamp"
+        );
+
+        // Saving the migrated vault must produce a file that the v2 decoder
+        // (and only the v2 decoder) can read back.
+        vault.save().expect("saving the migrated vault must succeed");
+        drop(vault);
+
+        let reopened = store.unlock("legacy master phrase").unwrap();
+        assert_eq!(reopened.data().version, CURRENT_VAULT_VERSION);
+        assert_eq!(reopened.data().accounts.len(), 2);
+    }
+
+    #[test]
+    fn account_new_zeroizes_secret_on_failure() {
+        // Phase 1.2 audit: when normalize_secret fails the caller's secret
+        // string must be wiped before the error propagates. The function
+        // cannot expose the zeroized bytes, but it must at least return an
+        // error and not panic, which exercises the `secret.zeroize()` branch.
+        let result = Account::new(
+            "Example".to_string(),
+            "alice@example.com".to_string(),
+            "not a valid base32 secret !!!".to_string(),
+            6,
+            30,
+            Algorithm::Sha1,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn account_metadata_round_trip() {
+        // Phase 2.3: added_at, last_used_at, use_count must survive a save /
+        // unlock cycle and stay accurate after multiple record_use() calls.
+        let directory = tempdir().unwrap();
+        let store = VaultStore::from_path(directory.path().join("vault.notp"));
+        let mut vault = store.create("correct horse battery staple").unwrap();
+        let mut account = Account::new(
+            "Example".to_string(),
+            "alice@example.com".to_string(),
+            "JBSWY3DPEHPK3PXP".to_string(),
+            6,
+            30,
+            Algorithm::Sha1,
+        )
+        .unwrap();
+        let original_added_at = account.added_at;
+        assert!(original_added_at > 0, "added_at must be set on creation");
+        assert_eq!(account.last_used_at, None);
+        assert_eq!(account.use_count, 0);
+
+        account.record_use();
+        account.record_use();
+        assert_eq!(account.use_count, 2);
+        assert!(account.last_used_at.is_some());
+
+        let id = account.id;
+        vault.data_mut().add_account(account).unwrap();
+        vault.save().unwrap();
+
+        let reopened = store.unlock("correct horse battery staple").unwrap();
+        let stored = reopened
+            .data()
+            .accounts
+            .iter()
+            .find(|account| account.id == id)
+            .expect("account must persist after a round trip");
+        assert_eq!(stored.added_at, original_added_at);
+        assert_eq!(stored.use_count, 2);
+        assert!(stored.last_used_at.is_some());
+    }
+
+    #[test]
+    fn account_edit_preserves_identity_and_metadata() {
+        // Phase 2.3: replacing an account in place (the edit flow) must keep
+        // its id (so the selection stays consistent), added_at and usage
+        // counters intact.
+        let mut original = Account::new(
+            "Example".to_string(),
+            "alice@example.com".to_string(),
+            "JBSWY3DPEHPK3PXP".to_string(),
+            6,
+            30,
+            Algorithm::Sha1,
+        )
+        .unwrap();
+        original.record_use();
+        original.record_use();
+        let original_id = original.id;
+        let added_at = original.added_at;
+        let last_used_at = original.last_used_at;
+
+        // Simulate the edit flow: build a fresh one (mirrors what the dialog
+        // returns) and inherit the stable identity before overwriting.
+        let mut replacement = Account::new(
+            "Example".to_string(),
+            "alice@example.com".to_string(),
+            "JBSWY3DPEHPK3PXP".to_string(),
+            8,
+            30,
+            Algorithm::Sha256,
+        )
+        .unwrap();
+        replacement.inherit_identity_from(&original);
+
+        assert_eq!(replacement.id, original_id);
+        assert_eq!(replacement.added_at, added_at);
+        assert_eq!(replacement.last_used_at, last_used_at);
+        assert_eq!(replacement.use_count, 2);
+        assert_eq!(replacement.digits, 8);
+        assert_eq!(replacement.algorithm, Algorithm::Sha256);
+    }
 
     #[test]
     fn creates_and_unlocks_a_vault() {

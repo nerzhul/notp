@@ -3,6 +3,7 @@ name = "notp"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
+build = "build.rs"
 
 [features]
 default = ["gtk", "cli", "camera"]
@@ -23,6 +24,10 @@ required-features = ["cli"]
 [lib]
 name = "notp"
 path = "src/lib.rs"
+
+[build-dependencies]
+# build.rs shells out to `git` to capture the current tag so the About
+# dialog can display something useful without pulling `vergen` or similar.
 
 [dependencies]
 aes-gcm = "0.10"
