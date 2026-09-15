@@ -10,10 +10,10 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
     Adjustment, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType,
-    ComboBoxText, Dialog, DialogFlags, DragSource, DropTarget, Entry, EventControllerKey,
-    Grid, HeaderBar, Label, ListBox, ListBoxRow, MenuButton, MessageDialog, Orientation, Paned,
-    Popover, ResponseType, ScrolledWindow, SelectionMode, SpinButton, Spinner, Stack,
-    WidgetPaintable,
+    ComboBoxText, CssProvider, Dialog, DialogFlags, DragSource, DrawingArea, DropTarget, Entry,
+    EventControllerKey, Grid, HeaderBar, Label, ListBox, ListBoxRow, MenuButton, MessageDialog,
+    Orientation, Overlay, Paned, Popover, ResponseType, ScrolledWindow, SelectionMode,
+    SpinButton, Spinner, Stack, WidgetPaintable,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -347,9 +347,110 @@ struct DetailWidgets {
     issuer: Label,
     account: Label,
     code: Label,
-    countdown: Label,
+    countdown: CountdownSpinner,
     copy: Button,
+    edit: Button,
     remove: Button,
+}
+
+#[derive(Clone)]
+struct CountdownSpinner {
+    area: DrawingArea,
+    state: Rc<RefCell<CountdownState>>,
+}
+
+struct CountdownState {
+    fraction: f64,
+    remaining: u64,
+}
+
+impl CountdownSpinner {
+    fn new() -> Self {
+        let state = Rc::new(RefCell::new(CountdownState {
+            fraction: 1.0,
+            remaining: 0,
+        }));
+        let area = DrawingArea::new();
+        area.set_content_width(96);
+        area.set_content_height(96);
+        area.set_halign(gtk::Align::Start);
+        let state_for_draw = state.clone();
+        area.set_draw_func(move |area, cr, width, height| {
+            let state = state_for_draw.borrow();
+            let size = width.min(height) as f64;
+            let line_width = (size * 0.08).max(4.0);
+            let radius = (size - line_width) / 2.0;
+            let cx = width as f64 / 2.0;
+            let cy = height as f64 / 2.0;
+
+            cr.set_line_width(line_width);
+            cr.set_line_cap(gtk::cairo::LineCap::Round);
+
+            let style = area.style_context();
+            let color = style.color();
+            let r = color.red() as f64;
+            let g = color.green() as f64;
+            let b = color.blue() as f64;
+
+            cr.set_source_rgba(r, g, b, 0.2);
+            cr.arc(cx, cy, radius, 0.0, 2.0 * std::f64::consts::PI);
+            cr.stroke().ok();
+
+            let (fr, fg, fb) = countdown_color(state.remaining);
+            let angle = 2.0 * std::f64::consts::PI * state.fraction.clamp(0.0, 1.0);
+            let start = -std::f64::consts::PI / 2.0;
+            if angle > 0.0 {
+                cr.set_source_rgba(fr, fg, fb, 0.9);
+                cr.arc(cx, cy, radius, start, start + angle);
+                cr.stroke().ok();
+            }
+
+            let text = format!("{}s", state.remaining);
+            let font_size = (size * 0.28).max(14.0);
+            cr.select_font_face(
+                "Sans",
+                gtk::cairo::FontSlant::Normal,
+                gtk::cairo::FontWeight::Bold,
+            );
+            cr.set_font_size(font_size);
+            let extents = cr.text_extents(&text).ok();
+            if let Some(extents) = extents {
+                let tx = cx - (extents.width() / 2.0 + extents.x_bearing());
+                let ty = cy - (extents.height() / 2.0 + extents.y_bearing());
+                cr.set_source_rgba(fr, fg, fb, 1.0);
+                cr.move_to(tx, ty);
+                cr.show_text(&text).ok();
+            }
+        });
+        Self { area, state }
+    }
+
+    fn update(&self, fraction: f64, remaining: u64) {
+        let mut state = self.state.borrow_mut();
+        let changed = (state.fraction - fraction).abs() > f64::EPSILON || state.remaining != remaining;
+        state.fraction = fraction;
+        state.remaining = remaining;
+        if changed {
+            self.area.queue_draw();
+        }
+    }
+}
+
+impl std::ops::Deref for CountdownSpinner {
+    type Target = DrawingArea;
+    fn deref(&self) -> &DrawingArea {
+        &self.area
+    }
+}
+
+fn countdown_color(remaining: u64) -> (f64, f64, f64) {
+    if remaining <= 5 {
+        (0.752, 0.110, 0.157)
+    } else if remaining <= 10 {
+        (0.898, 0.647, 0.039)
+    } else {
+        (0.180, 0.761, 0.494)
+    }
 }
 
 #[derive(Clone)]
@@ -360,6 +461,8 @@ struct RenderContext {
     detail: DetailWidgets,
     selected: Rc<Cell<Option<Uuid>>>,
     filter: Rc<RefCell<String>>,
+    toast: Rc<RefCell<Option<Label>>>,
+    toast_overlay: Rc<RefCell<Option<GtkBox>>>,
 }
 
 fn show_main_window(application: &Application, vault: Vault) {
@@ -377,6 +480,8 @@ fn show_main_window(application: &Application, vault: Vault) {
     let selected = Rc::new(Cell::new(None::<Uuid>));
     let row_labels = Rc::new(RefCell::new(HashMap::new()));
     let filter = Rc::new(RefCell::new(String::new()));
+    let toast = Rc::new(RefCell::new(None::<Label>));
+    let toast_overlay = Rc::new(RefCell::new(None::<GtkBox>));
 
     let header = HeaderBar::new();
     let header_box = GtkBox::new(Orientation::Horizontal, 6);
@@ -486,16 +591,18 @@ fn show_main_window(application: &Application, vault: Vault) {
     detail_code.set_xalign(0.0);
     detail_code.set_selectable(true);
     detail_content.append(&detail_code);
-    let detail_countdown = Label::new(None);
-    detail_countdown.set_xalign(0.0);
-    detail_content.append(&detail_countdown);
+    let detail_countdown = CountdownSpinner::new();
+    detail_content.append(&*detail_countdown);
 
     let action_box = GtkBox::new(Orientation::Horizontal, 8);
     let copy_button = Button::with_label("Copy code");
     copy_button.set_sensitive(false);
+    let edit_button = Button::with_label("Edit");
+    edit_button.set_sensitive(false);
     let remove_button = Button::with_label("Delete");
     remove_button.set_sensitive(false);
     action_box.append(&copy_button);
+    action_box.append(&edit_button);
     action_box.append(&remove_button);
     detail_content.append(&action_box);
     detail_stack.add_named(&detail_content, Some("content"));
@@ -517,7 +624,22 @@ fn show_main_window(application: &Application, vault: Vault) {
 
     let main_box = GtkBox::new(Orientation::Vertical, 0);
     main_box.append(&paned);
-    window.set_child(Some(&main_box));
+
+    let toast_box = GtkBox::new(Orientation::Horizontal, 0);
+    toast_box.add_css_class("notp-toast");
+    toast_box.set_halign(gtk::Align::End);
+    toast_box.set_valign(gtk::Align::End);
+    toast_box.set_margin_end(24);
+    toast_box.set_margin_bottom(24);
+    toast_box.set_visible(false);
+    let toast_label = Label::new(None);
+    toast_label.set_xalign(0.5);
+    toast_box.append(&toast_label);
+
+    let overlay = Overlay::new();
+    overlay.set_child(Some(&main_box));
+    overlay.add_overlay(&toast_box);
+    window.set_child(Some(&overlay));
 
     let detail = DetailWidgets {
         stack: detail_stack,
@@ -526,6 +648,7 @@ fn show_main_window(application: &Application, vault: Vault) {
         code: detail_code,
         countdown: detail_countdown,
         copy: copy_button,
+        edit: edit_button,
         remove: remove_button,
     };
     let context = RenderContext {
@@ -539,11 +662,16 @@ fn show_main_window(application: &Application, vault: Vault) {
             code: detail.code.clone(),
             countdown: detail.countdown.clone(),
             copy: detail.copy.clone(),
+            edit: detail.edit.clone(),
             remove: detail.remove.clone(),
         },
         selected: selected.clone(),
         filter: filter.clone(),
+        toast: toast.clone(),
+        toast_overlay: toast_overlay.clone(),
     };
+    *toast.borrow_mut() = Some(toast_label);
+    *toast_overlay.borrow_mut() = Some(toast_box);
 
     list_box.connect_row_selected({
         let context = context.clone();
@@ -801,6 +929,15 @@ fn show_main_window(application: &Application, vault: Vault) {
     let window_for_copy = window.clone();
     detail.copy.connect_clicked(move |_| {
         copy_current_code(&context_for_copy, &window_for_copy, ClipboardTarget::Code);
+    });
+
+    let context_for_edit = context.clone();
+    let window_for_edit = window.clone();
+    detail.edit.connect_clicked(move |_| {
+        let Some(id) = context_for_edit.selected.get() else {
+            return;
+        };
+        edit_selected(&context_for_edit, &window_for_edit, id);
     });
 
     let context_for_remove = context.clone();
@@ -1198,6 +1335,7 @@ fn show_selected(context: &RenderContext) {
     let Some(id) = context.selected.get() else {
         context.detail.stack.set_visible_child_name("empty");
         context.detail.copy.set_sensitive(false);
+        context.detail.edit.set_sensitive(false);
         context.detail.remove.set_sensitive(false);
         return;
     };
@@ -1207,6 +1345,7 @@ fn show_selected(context: &RenderContext) {
         context.selected.set(None);
         context.detail.stack.set_visible_child_name("empty");
         context.detail.copy.set_sensitive(false);
+        context.detail.edit.set_sensitive(false);
         context.detail.remove.set_sensitive(false);
         return;
     };
@@ -1214,6 +1353,7 @@ fn show_selected(context: &RenderContext) {
     context.detail.account.set_text(&account.name);
     context.detail.stack.set_visible_child_name("content");
     context.detail.copy.set_sensitive(true);
+    context.detail.edit.set_sensitive(true);
     context.detail.remove.set_sensitive(true);
 }
 
@@ -1245,10 +1385,14 @@ fn refresh_codes(context: &RenderContext) {
             )
             .unwrap_or_else(|_| "------".to_string());
             context.detail.code.set_text(&code);
-            context.detail.countdown.set_text(&format!(
-                "Expires in {} s",
-                remaining_seconds(timestamp, account.period)
-            ));
+            let remaining = remaining_seconds(timestamp, account.period);
+            let period = account.period;
+            let fraction = if period > 0 {
+                remaining as f64 / period as f64
+            } else {
+                0.0
+            };
+            context.detail.countdown.update(fraction, remaining);
         }
     }
 }
@@ -1508,16 +1652,19 @@ fn copy_current_code(context: &RenderContext, window: &ApplicationWindow, target
                 )
                 .unwrap_or_else(|_| "------".to_string()),
                 account.secret().to_string(),
+                account.period,
             )
         })
     };
-    let Some((issuer, name, code, secret)) = snapshot else {
+    let Some((issuer, name, code, secret, period)) = snapshot else {
         return;
     };
     match target {
         ClipboardTarget::Code => {
             copy_to_clipboard(window, &code);
-            register_clipboard_auto_clear(window, code);
+            register_clipboard_auto_clear(window, code.clone());
+            let remaining = remaining_seconds(current_timestamp(), period);
+            show_toast(context, &format!("Code copied — expires in {} s", remaining));
         }
         ClipboardTarget::Secret => {
             copy_to_clipboard(window, &secret);
@@ -1525,6 +1672,20 @@ fn copy_current_code(context: &RenderContext, window: &ApplicationWindow, target
         }
     }
     let _ = (issuer, name);
+}
+
+fn show_toast(context: &RenderContext, message: &str) {
+    let Some(label) = context.toast.borrow().clone() else {
+        return;
+    };
+    let Some(overlay_box) = context.toast_overlay.borrow().clone() else {
+        return;
+    };
+    label.set_text(message);
+    overlay_box.set_visible(true);
+    glib::timeout_add_seconds_local_once(3, move || {
+        overlay_box.set_visible(false);
+    });
 }
 
 fn register_clipboard_auto_clear(window: &ApplicationWindow, value: String) {
@@ -1927,13 +2088,25 @@ where
 }
 
 fn apply_theme(theme: &Theme) {
-    let theme_name = match theme {
-        Theme::Light => "light",
-        Theme::Dark => "dark",
-        Theme::System => "default",
-    };
     if let Some(settings) = gtk::Settings::default() {
         settings.set_property("gtk-application-prefer-dark-theme", matches!(theme, Theme::Dark));
     }
-    let _ = theme_name;
+    let provider = CssProvider::new();
+    provider.load_from_data(NOTP_CSS);
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 }
+
+const NOTP_CSS: &str = "
+.notp-toast {
+    padding: 10px 16px;
+    border-radius: 8px;
+    background-color: alpha(#000000, 0.85);
+    color: #ffffff;
+}
+";
