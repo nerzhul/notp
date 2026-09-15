@@ -1,4 +1,4 @@
-BINARY := notp
+BINARIES := notp-cli notp-gui
 APP_ID := com.nerzhul.notp
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
 
@@ -9,17 +9,17 @@ APPLICATIONSDIR ?= $(DATADIR)/applications
 ICONDIR ?= $(DATADIR)/icons/hicolor
 
 CARGO ?= cargo
-DESTDIR ?=
+DESTDIR ?= 
 FEATURES ?= camera
 
 CARGO_FLAGS ?= $(if $(FEATURES),--features $(FEATURES),)
 
 BUILD_DIR := target
-RELEASE_BIN := $(BUILD_DIR)/release/$(BINARY)
-DEBUG_BIN := $(BUILD_DIR)/debug/$(BINARY)
+RELEASE_BIN := $(BUILD_DIR)/release
+DEBUG_BIN := $(BUILD_DIR)/debug
 
-INSTALL_BIN := $(DESTDIR)$(BINDIR)/$(BINARY)
-INSTALL_DESKTOP := $(DESTDIR)$(APPLICATIONSDIR)/$(BINARY).desktop
+INSTALL_BIN := $(patsubst %,$(DESTDIR)$(BINDIR)/%,$(BINARIES))
+INSTALL_DESKTOP := $(DESTDIR)$(APPLICATIONSDIR)/notp.desktop
 
 .PHONY: all build build-release release debug clean install uninstall
 
@@ -35,8 +35,13 @@ clean:
 	$(CARGO) clean
 
 install: build-release
-	install -Dm0755 $(RELEASE_BIN) $(INSTALL_BIN)
-	install -Dm0644 $(BINARY).desktop $(INSTALL_DESKTOP)
+	$(foreach bin,$(BINARIES),$(call install_bin,$(bin)))
+	install -Dm0644 notp.desktop $(INSTALL_DESKTOP)
 
 uninstall:
-	rm -f $(INSTALL_BIN) $(INSTALL_DESKTOP)
+	$(foreach bin,$(BINARIES),rm -f $(DESTDIR)$(BINDIR)/$(bin))
+	rm -f $(INSTALL_DESKTOP)
+
+define install_bin
+	install -Dm0755 $(RELEASE_BIN)/$(1) $(DESTDIR)$(BINDIR)/$(1)
+endef

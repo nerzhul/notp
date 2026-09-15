@@ -4,12 +4,33 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 
+[features]
+default = ["gtk", "cli", "camera"]
+gtk = ["dep:gdk4", "dep:glib", "dep:gtk"]
+cli = ["dep:clap"]
+camera = []
+
+[[bin]]
+name = "notp-gui"
+path = "src/bin/gui.rs"
+required-features = ["gtk"]
+
+[[bin]]
+name = "notp-cli"
+path = "src/bin/cli.rs"
+required-features = ["cli"]
+
+[lib]
+name = "notp"
+path = "src/lib.rs"
+
 [dependencies]
 aes-gcm = "0.10"
 anyhow = "1.0"
 argon2 = "0.5"
 base64 = "0.22"
 bincode = "1.3"
+clap = { version = "4", features = ["derive"], optional = true }
 digest = "0.10"
 dirs = "5.0"
 gdk4 = { version = "0.9", optional = true }
@@ -28,11 +49,6 @@ sha1 = "0.10"
 sha2 = "0.10"
 uuid = { version = "1.8", features = ["serde", "v4"] }
 zeroize = "1.7"
-
-[features]
-default = ["gtk"]
-gtk = ["dep:gdk4", "dep:glib", "dep:gtk"]
-camera = []
 
 [dev-dependencies]
 tempfile = "3.10"
