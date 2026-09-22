@@ -1,3 +1,13 @@
+[workspace]
+members = [".", "android/rust"]
+
+[profile.release-android]
+inherits = "release"
+lto = "thin"
+strip = "symbols"
+opt-level = "s"
+codegen-units = 1
+
 [package]
 name = "notp"
 version = "0.1.0"
@@ -53,6 +63,7 @@ serde_json = "1.0"
 sha1 = "0.10"
 sha2 = "0.10"
 uuid = { version = "1.8", features = ["serde", "v4"] }
+uniffi = { version = "0.27", features = ["cli"], optional = true }
 zeroize = "1.7"
 
 [dev-dependencies]

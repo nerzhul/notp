@@ -1,0 +1,17 @@
+[package]
+name = "notp-android"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[lib]
+name = "notp_android"
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+
+[dependencies]
+notp = { path = "../../", default-features = false }
+uniffi = { version = "0.27", features = ["cli"] }
+thiserror = "1.0"
+uuid = { version = "1.8", features = ["v4"] }

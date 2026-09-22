@@ -3,7 +3,6 @@ use hmac::{Mac, SimpleHmac};
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
-#[cfg(feature = "gtk")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -14,7 +13,6 @@ pub enum Algorithm {
     Sha512,
 }
 
-#[cfg(feature = "gtk")]
 impl Algorithm {
     pub fn label(self) -> &'static str {
         match self {
@@ -25,7 +23,6 @@ impl Algorithm {
     }
 }
 
-#[cfg(feature = "gtk")]
 pub fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -58,7 +55,6 @@ pub fn generate_code(
     }
 }
 
-#[cfg(feature = "gtk")]
 pub fn remaining_seconds(timestamp: u64, period: u32) -> u64 {
     if period == 0 {
         return 0;

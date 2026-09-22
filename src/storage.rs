@@ -10,11 +10,24 @@ use uuid::Uuid;
 use zeroize::Zeroize;
 
 const SALT_LENGTH: usize = 16;
+const VAULT_MAGIC_V1: &[u8; 5] = b"NOTP1";
+const VAULT_MAGIC_V3: &[u8; 5] = b"NOTP3";
 /// Current on-disk VaultData schema version. Phase 2.3 added per-entry usage
 /// metadata (added_at / last_used_at / use_count), which is not representable
 /// in bincode without a versioned layout; the bump forces a one-shot upgrade
 /// of every existing v1 vault on next unlock.
 pub const CURRENT_VAULT_VERSION: u32 = 2;
+
+/// On-disk vault envelope discriminator. V1 vaults use Argon2id + a master
+/// password (desktop GTK path); V3 vaults use a raw 32-byte key sealed by
+/// Android Keystore (mobile path). The two formats are deliberately
+/// non-interchangeable: a v3 vault cannot be opened on the desktop and vice
+/// versa, by design.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EnvelopeFormat {
+    V1,
+    V3,
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Account {
@@ -67,7 +80,6 @@ impl Account {
         Ok(account)
     }
 
-    #[cfg(feature = "gtk")]
     pub fn secret(&self) -> &str {
         &self.secret
     }
@@ -253,6 +265,7 @@ pub struct Vault {
     key: [u8; 32],
     salt: [u8; SALT_LENGTH],
     store: VaultStore,
+    envelope: EnvelopeFormat,
     #[allow(dead_code)]
     lock: Option<VaultLock>,
 }
@@ -276,7 +289,12 @@ impl Vault {
         self.data.validate()?;
         let mut plaintext =
             bincode::serialize(&self.data).context("Unable to serialize entries")?;
-        let encoded = crypto::seal_with_key_and_salt(&plaintext, &self.key, &self.salt)?;
+        let encoded = match self.envelope {
+            EnvelopeFormat::V1 => {
+                crypto::seal_with_key_and_salt(&plaintext, &self.key, &self.salt)?
+            }
+            EnvelopeFormat::V3 => crypto::seal_v3(&plaintext, &self.key, &self.salt)?,
+        };
         plaintext.zeroize();
         backup_previous(self.store.path())?;
         write_atomic(self.store.path(), &encoded)
@@ -427,6 +445,34 @@ impl VaultStore {
             key,
             salt,
             store: self.clone(),
+            envelope: EnvelopeFormat::V1,
+            lock: None,
+        })
+    }
+
+    /// Create a v3 (Android) vault using a pre-derived 32-byte key. The salt
+    /// is randomly generated and only used as AAD — it carries no secret
+    /// material and is therefore safe to leave on disk next to the ciphertext.
+    pub fn create_with_key(&self, key: &[u8; 32]) -> Result<Vault> {
+        if self.exists() {
+            bail!("Vault already exists");
+        }
+        let mut key_arr = [0_u8; 32];
+        key_arr.copy_from_slice(key);
+
+        let data = VaultData::new();
+        let mut plaintext = bincode::serialize(&data).context("Unable to serialize the vault")?;
+        let mut salt = [0_u8; SALT_LENGTH];
+        OsRng.fill_bytes(&mut salt);
+        let encoded = crypto::seal_v3(&plaintext, &key_arr, &salt)?;
+        plaintext.zeroize();
+        write_atomic(&self.path, &encoded)?;
+        Ok(Vault {
+            data,
+            key: key_arr,
+            salt,
+            store: self.clone(),
+            envelope: EnvelopeFormat::V3,
             lock: None,
         })
     }
@@ -435,9 +481,17 @@ impl VaultStore {
         if !self.exists() {
             bail!("Vault does not exist");
         }
+        let encoded = fs::read(&self.path).context("Unable to read the vault")?;
+        // Reject v3 envelopes from the desktop path with a clear message:
+        // they are bound to an Android Keystore key that does not exist here.
+        match peek_envelope(&encoded) {
+            Some(EnvelopeFormat::V3) => {
+                bail!("This vault was created on Android and cannot be opened here")
+            }
+            Some(EnvelopeFormat::V1) | None => {}
+        }
         let lock = VaultLock::acquire(&self.path)
             .context("Vault is already locked by another instance")?;
-        let encoded = fs::read(&self.path).context("Unable to read the vault")?;
         let (key, salt, mut plaintext) = crypto::open_with_key_and_salt(&encoded, password)?;
         // bincode is not self-describing: `#[serde(default)]` is silently
         // ignored on a shorter payload, which would otherwise break every
@@ -488,7 +542,60 @@ impl VaultStore {
             key,
             salt,
             store: self.clone(),
+            envelope: EnvelopeFormat::V1,
             lock: Some(lock),
+        })
+    }
+
+    /// Open an existing v3 (Android) vault with a pre-derived 32-byte key.
+    /// Rejects a v1 envelope with a clear message so the caller can route
+    /// to the password-based path instead.
+    pub fn unlock_with_key(&self, key: &[u8; 32]) -> Result<Vault> {
+        if !self.exists() {
+            bail!("Vault does not exist");
+        }
+        let encoded = fs::read(&self.path).context("Unable to read the vault")?;
+        match peek_envelope(&encoded) {
+            Some(EnvelopeFormat::V1) => {
+                bail!("This vault was created on the desktop and cannot be opened on Android")
+            }
+            Some(EnvelopeFormat::V3) | None => {}
+        }
+        let mut key_arr = [0_u8; 32];
+        key_arr.copy_from_slice(key);
+        let (salt, mut plaintext) = crypto::open_v3(&encoded, &key_arr)?;
+        let on_disk_version = peek_varint_u32(&plaintext)
+            .context("Unable to read the vault schema version")?;
+        let data: VaultData = match on_disk_version {
+            CURRENT_VAULT_VERSION => {
+                let data = match bincode::deserialize(&plaintext)
+                    .context("Vault is incompatible or corrupted") {
+                    Ok(data) => data,
+                    Err(error) => {
+                        plaintext.zeroize();
+                        return Err(error);
+                    }
+                };
+                plaintext.zeroize();
+                data
+            }
+            other => {
+                plaintext.zeroize();
+                bail!(
+                    "Unsupported vault data version {} (expected {})",
+                    other,
+                    CURRENT_VAULT_VERSION
+                );
+            }
+        };
+        data.validate().context("Vault data is invalid")?;
+        Ok(Vault {
+            data,
+            key: key_arr,
+            salt,
+            store: self.clone(),
+            envelope: EnvelopeFormat::V3,
+            lock: None,
         })
     }
 
@@ -651,6 +758,22 @@ fn peek_varint_u32(bytes: &[u8]) -> Option<u32> {
     None
 }
 
+/// Identify the on-disk envelope of a vault by reading only the magic bytes.
+/// Returns `None` for files too short to contain a recognizable header or
+/// for unknown / future envelopes.
+pub fn peek_envelope(bytes: &[u8]) -> Option<EnvelopeFormat> {
+    if bytes.len() < VAULT_MAGIC_V1.len() {
+        return None;
+    }
+    if &bytes[..VAULT_MAGIC_V1.len()] == VAULT_MAGIC_V1 {
+        Some(EnvelopeFormat::V1)
+    } else if &bytes[..VAULT_MAGIC_V3.len()] == VAULT_MAGIC_V3 {
+        Some(EnvelopeFormat::V3)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,6 +789,106 @@ mod tests {
         assert_eq!(peek_varint_u32(&[]), None);
         // 5 bytes with the continuation bit still set → truncated varint.
         assert_eq!(peek_varint_u32(&[0x80; 5]), None);
+    }
+
+    #[test]
+    fn peek_envelope_recognizes_magic() {
+        let mut v1 = vec![0_u8; 32];
+        v1[..5].copy_from_slice(VAULT_MAGIC_V1);
+        assert_eq!(peek_envelope(&v1), Some(EnvelopeFormat::V1));
+        let mut v3 = vec![0_u8; 32];
+        v3[..5].copy_from_slice(VAULT_MAGIC_V3);
+        assert_eq!(peek_envelope(&v3), Some(EnvelopeFormat::V3));
+        assert_eq!(peek_envelope(&[]), None);
+        let short = [b'N', b'O', b'T'];
+        assert_eq!(peek_envelope(&short), None);
+        let mut unknown = vec![0_u8; 32];
+        unknown[..5].copy_from_slice(b"OTHER");
+        assert_eq!(peek_envelope(&unknown), None);
+    }
+
+    #[test]
+    fn v3_create_and_unlock_round_trip() {
+        let directory = tempdir().unwrap();
+        let vault_path = directory.path().join("vault.notp");
+        let store = VaultStore::from_path(vault_path.clone());
+
+        let mut key = [0_u8; 32];
+        OsRng.fill_bytes(&mut key);
+
+        let mut vault = store.create_with_key(&key).unwrap();
+        let account = Account::new(
+            "Example".to_string(),
+            "alice@example.com".to_string(),
+            "JBSWY3DPEHPK3PXP".to_string(),
+            6,
+            30,
+            Algorithm::Sha1,
+        )
+        .unwrap();
+        vault.data_mut().add_account(account).unwrap();
+        vault.save().unwrap();
+        drop(vault);
+
+        // Re-opening with the same key must succeed and preserve the entry.
+        let reopened = store.unlock_with_key(&key).unwrap();
+        assert_eq!(reopened.data().version, CURRENT_VAULT_VERSION);
+        assert_eq!(reopened.data().accounts.len(), 1);
+        assert_eq!(reopened.data().accounts[0].issuer, "Example");
+
+        // Save/load again to exercise the round-trip on the v3 envelope path.
+        reopened.save().unwrap();
+        let final_read = store.unlock_with_key(&key).unwrap();
+        assert_eq!(final_read.data().accounts.len(), 1);
+
+        // A different key must not unlock the vault.
+        let mut wrong = key;
+        wrong[0] ^= 0x01;
+        assert!(store.unlock_with_key(&wrong).is_err());
+
+        // The on-disk header must spell NOTP3 so future versions can detect it.
+        let header = std::fs::read(&vault_path).unwrap();
+        assert_eq!(&header[..5], VAULT_MAGIC_V3);
+    }
+
+    #[test]
+    fn desktop_unlock_rejects_v3_vault() {
+        let directory = tempdir().unwrap();
+        let vault_path = directory.path().join("vault.notp");
+        let store = VaultStore::from_path(vault_path);
+
+        let mut key = [0_u8; 32];
+        OsRng.fill_bytes(&mut key);
+        store.create_with_key(&key).unwrap();
+
+        let error = store
+            .unlock("any password attempt")
+            .err()
+            .expect("desktop unlock must refuse a v3 vault");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Android"),
+            "the rejection must explain the v3 origin, got: {message}"
+        );
+    }
+
+    #[test]
+    fn mobile_unlock_rejects_v1_vault() {
+        let directory = tempdir().unwrap();
+        let vault_path = directory.path().join("vault.notp");
+        let store = VaultStore::from_path(vault_path);
+        store.create("correct horse battery staple").unwrap();
+
+        let key = [0_u8; 32];
+        let error = store
+            .unlock_with_key(&key)
+            .err()
+            .expect("mobile unlock must refuse a v1 vault");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("desktop"),
+            "the rejection must explain the v1 origin, got: {message}"
+        );
     }
 
     #[test]

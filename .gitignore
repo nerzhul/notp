@@ -1,2 +1,10 @@
 target/
 .kilo/
+android/build/
+android/app/build/
+android/local.properties
+android/keystore/
+android/.gradle/
+android/app/src/main/jniLibs/
+*.iml
+.idea/

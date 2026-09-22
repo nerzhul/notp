@@ -38,6 +38,29 @@ pub fn decode_qr_from_path<P: AsRef<Path>>(path: P) -> Result<Vec<OtpParams>> {
     })
 }
 
+pub fn decode_qr_from_bytes(bytes: &[u8]) -> Result<Vec<OtpParams>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    #[allow(deprecated)]
+    let image = match image::load_from_memory(bytes) {
+        Ok(image) => image,
+        Err(_) => return Ok(Vec::new()),
+    };
+    #[allow(deprecated)]
+    let gray = image.to_luma();
+    let mut prepared = rqrr::PreparedImage::prepare(gray);
+    let grids = prepared.detect_grids();
+    let Some(grid) = grids.into_iter().next() else {
+        return Ok(Vec::new());
+    };
+    let (_meta, payload) = match grid.decode() {
+        Ok(decoded) => decoded,
+        Err(_) => return Ok(Vec::new()),
+    };
+    decode_qr_payload(&payload)
+}
+
 pub fn decode_qr_payload(payload: &str) -> Result<Vec<OtpParams>> {
     let url = url::Url::parse(payload).context("The QR code does not contain a valid URI")?;
     match url.scheme() {

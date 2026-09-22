@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 const MAGIC: &[u8; 5] = b"NOTP1";
+const MAGIC_V3: &[u8; 5] = b"NOTP3";
 const FILE_VERSION: u8 = 1;
+const FILE_VERSION_V3: u8 = 3;
 const SALT_LENGTH: usize = 16;
 const NONCE_LENGTH: usize = 12;
 const KEY_LENGTH: usize = 32;
@@ -116,6 +118,96 @@ pub fn seal_with_key_and_salt(
 
 pub fn derive_production_key(password: &str, salt: &[u8; SALT_LENGTH]) -> Result<[u8; KEY_LENGTH]> {
     derive_key(password, salt, KdfParams::production())
+}
+
+/// Encrypt `plaintext` with a pre-derived raw AES-256 key (no KDF), wrapping
+/// the result in the `NOTP3` envelope used by the Android build. The salt is
+/// only used as additional authenticated data — it carries no secret material.
+pub fn seal_v3(plaintext: &[u8], key: &[u8; KEY_LENGTH], salt: &[u8; SALT_LENGTH]) -> Result<Vec<u8>> {
+    if key.len() != KEY_LENGTH {
+        bail!("Invalid encryption key");
+    }
+    let mut nonce = [0_u8; NONCE_LENGTH];
+    OsRng.fill_bytes(&mut nonce);
+    let ciphertext = encrypt_v3(plaintext, key, salt, &nonce)
+        .map_err(|_| anyhow::anyhow!("Unable to encrypt the vault"))?;
+    let mut encoded = Vec::with_capacity(MAGIC_V3.len() + 1 + 1 + SALT_LENGTH + NONCE_LENGTH + ciphertext.len());
+    encoded.extend_from_slice(MAGIC_V3);
+    encoded.push(FILE_VERSION_V3);
+    encoded.push(0); // flags: reserved for future use
+    encoded.extend_from_slice(salt);
+    encoded.extend_from_slice(&nonce);
+    encoded.extend_from_slice(&ciphertext);
+    Ok(encoded)
+}
+
+/// Decrypt a `NOTP3` envelope with a pre-derived raw AES-256 key. Returns the
+/// decorative salt (AAD-only) and the recovered plaintext.
+pub fn open_v3(encoded: &[u8], key: &[u8; KEY_LENGTH]) -> Result<([u8; SALT_LENGTH], Vec<u8>)> {
+    let header_len = MAGIC_V3.len() + 1 + 1 + SALT_LENGTH + NONCE_LENGTH;
+    if encoded.len() < header_len {
+        bail!("Truncated v3 vault");
+    }
+    if &encoded[..MAGIC_V3.len()] != MAGIC_V3 {
+        bail!("Unknown v3 envelope");
+    }
+    let version = encoded[MAGIC_V3.len()];
+    if version != FILE_VERSION_V3 {
+        bail!("Unsupported v3 vault version");
+    }
+    let flags = encoded[MAGIC_V3.len() + 1];
+    if flags != 0 {
+        bail!("Unsupported v3 vault flags");
+    }
+    let mut salt = [0_u8; SALT_LENGTH];
+    salt.copy_from_slice(&encoded[MAGIC_V3.len() + 2..MAGIC_V3.len() + 2 + SALT_LENGTH]);
+    let mut nonce = [0_u8; NONCE_LENGTH];
+    nonce.copy_from_slice(
+        &encoded[MAGIC_V3.len() + 2 + SALT_LENGTH..MAGIC_V3.len() + 2 + SALT_LENGTH + NONCE_LENGTH],
+    );
+    let ciphertext = &encoded[header_len..];
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("Invalid encryption key"))?;
+    let aad = build_v3_aad(&salt, &nonce);
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: ciphertext,
+                aad: aad.as_slice(),
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("Incorrect key or corrupted vault"))?;
+    Ok((salt, plaintext))
+}
+
+fn encrypt_v3(
+    plaintext: &[u8],
+    key: &[u8; KEY_LENGTH],
+    salt: &[u8; SALT_LENGTH],
+    nonce: &[u8; NONCE_LENGTH],
+) -> Result<Vec<u8>> {
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("Invalid encryption key"))?;
+    let aad = build_v3_aad(salt, nonce);
+    cipher
+        .encrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: plaintext,
+                aad: aad.as_slice(),
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("Unable to encrypt the vault"))
+}
+
+fn build_v3_aad(salt: &[u8; SALT_LENGTH], nonce: &[u8; NONCE_LENGTH]) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(MAGIC_V3.len() + 1 + 1 + SALT_LENGTH + NONCE_LENGTH);
+    aad.extend_from_slice(MAGIC_V3);
+    aad.push(FILE_VERSION_V3);
+    aad.push(0); // flags (must match the value written by seal_v3)
+    aad.extend_from_slice(salt);
+    aad.extend_from_slice(nonce);
+    aad
 }
 
 fn derive_key(
@@ -329,5 +421,39 @@ mod tests {
             open_with_key_and_salt(&encoded, "password").is_err(),
             "output_length=16 must be rejected"
         );
+    }
+
+    #[test]
+    fn v3_round_trip_and_rejects_wrong_key() {
+        let plaintext = b"v3 secret data";
+        let mut key = [0_u8; KEY_LENGTH];
+        OsRng.fill_bytes(&mut key);
+        let mut salt = [0_u8; SALT_LENGTH];
+        OsRng.fill_bytes(&mut salt);
+        let encoded = seal_v3(plaintext, &key, &salt).unwrap();
+        // Header sanity: the leading 5 bytes must spell NOTP3 so storage.rs
+        // can discriminate v3 vaults from v1 vaults by a single peek.
+        assert_eq!(&encoded[..5], b"NOTP3");
+        let (recovered_salt, decoded) = open_v3(&encoded, &key).unwrap();
+        assert_eq!(recovered_salt, salt);
+        assert_eq!(decoded, plaintext);
+
+        let mut wrong_key = key;
+        wrong_key[0] ^= 0x01;
+        assert!(open_v3(&encoded, &wrong_key).is_err());
+    }
+
+    #[test]
+    fn v3_detects_tampering() {
+        let plaintext = b"v3 integrity check";
+        let mut key = [0_u8; KEY_LENGTH];
+        OsRng.fill_bytes(&mut key);
+        let mut salt = [0_u8; SALT_LENGTH];
+        OsRng.fill_bytes(&mut salt);
+        let encoded = seal_v3(plaintext, &key, &salt).unwrap();
+        let mut tampered = encoded.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(open_v3(&tampered, &key).is_err());
     }
 }
