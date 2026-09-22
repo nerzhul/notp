@@ -557,6 +557,8 @@ fn show_main_window(application: &Application, vault: Vault) {
     let list_box = ListBox::new();
     list_box.set_selection_mode(SelectionMode::Single);
     list_box.set_activate_on_single_click(false);
+    list_box.set_focusable(true);
+    list_box.set_focus_on_click(true);
     list_scroller.set_child(Some(&list_box));
 
     let search_entry = Entry::new();
@@ -698,6 +700,32 @@ fn show_main_window(application: &Application, vault: Vault) {
             refresh_codes(&context);
         }
     });
+
+    let list_key_controller = EventControllerKey::new();
+    let context_for_list_keys = context.clone();
+    let window_for_list_keys = window.clone();
+    list_key_controller.connect_key_pressed(move |_, key, _keycode, state| {
+        let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+        if ctrl && !shift && key == gtk::gdk::Key::c {
+            copy_current_code(
+                &context_for_list_keys,
+                &window_for_list_keys,
+                ClipboardTarget::Code,
+            );
+            return glib::Propagation::Stop;
+        }
+        if ctrl && shift && key == gtk::gdk::Key::C {
+            copy_current_code(
+                &context_for_list_keys,
+                &window_for_list_keys,
+                ClipboardTarget::Secret,
+            );
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    list_box.add_controller(list_key_controller);
 
     search_entry.connect_changed({
         let context = context.clone();
