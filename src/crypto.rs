@@ -123,7 +123,11 @@ pub fn derive_production_key(password: &str, salt: &[u8; SALT_LENGTH]) -> Result
 /// Encrypt `plaintext` with a pre-derived raw AES-256 key (no KDF), wrapping
 /// the result in the `NOTP3` envelope used by the Android build. The salt is
 /// only used as additional authenticated data — it carries no secret material.
-pub fn seal_v3(plaintext: &[u8], key: &[u8; KEY_LENGTH], salt: &[u8; SALT_LENGTH]) -> Result<Vec<u8>> {
+pub fn seal_v3(
+    plaintext: &[u8],
+    key: &[u8; KEY_LENGTH],
+    salt: &[u8; SALT_LENGTH],
+) -> Result<Vec<u8>> {
     if key.len() != KEY_LENGTH {
         bail!("Invalid encryption key");
     }
@@ -131,7 +135,8 @@ pub fn seal_v3(plaintext: &[u8], key: &[u8; KEY_LENGTH], salt: &[u8; SALT_LENGTH
     OsRng.fill_bytes(&mut nonce);
     let ciphertext = encrypt_v3(plaintext, key, salt, &nonce)
         .map_err(|_| anyhow::anyhow!("Unable to encrypt the vault"))?;
-    let mut encoded = Vec::with_capacity(MAGIC_V3.len() + 1 + 1 + SALT_LENGTH + NONCE_LENGTH + ciphertext.len());
+    let mut encoded =
+        Vec::with_capacity(MAGIC_V3.len() + 1 + 1 + SALT_LENGTH + NONCE_LENGTH + ciphertext.len());
     encoded.extend_from_slice(MAGIC_V3);
     encoded.push(FILE_VERSION_V3);
     encoded.push(0); // flags: reserved for future use
@@ -166,7 +171,8 @@ pub fn open_v3(encoded: &[u8], key: &[u8; KEY_LENGTH]) -> Result<([u8; SALT_LENG
         &encoded[MAGIC_V3.len() + 2 + SALT_LENGTH..MAGIC_V3.len() + 2 + SALT_LENGTH + NONCE_LENGTH],
     );
     let ciphertext = &encoded[header_len..];
-    let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("Invalid encryption key"))?;
+    let cipher =
+        Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("Invalid encryption key"))?;
     let aad = build_v3_aad(&salt, &nonce);
     let plaintext = cipher
         .decrypt(
@@ -222,7 +228,10 @@ fn derive_key(
         // before propagating so the partial secret material does not linger on
         // the stack or in heap copies of the array.
         key.zeroize();
-        return Err(anyhow::anyhow!("Failed to derive the master key: {}", error));
+        return Err(anyhow::anyhow!(
+            "Failed to derive the master key: {}",
+            error
+        ));
     }
     Ok(key)
 }

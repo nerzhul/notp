@@ -9,11 +9,11 @@ use gtk::gdk::{ContentProvider, DragAction};
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
-    Adjustment, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType,
-    ComboBoxText, CssProvider, Dialog, DialogFlags, DragSource, DrawingArea, DropTarget, Entry,
+    Adjustment, Application, ApplicationWindow, Box as GtkBox, Button, ButtonsType, ComboBoxText,
+    CssProvider, Dialog, DialogFlags, DragSource, DrawingArea, DropTarget, Entry,
     EventControllerKey, Grid, HeaderBar, Label, ListBox, ListBoxRow, MenuButton, MessageDialog,
-    Orientation, Overlay, Paned, Popover, ResponseType, ScrolledWindow, SelectionMode,
-    Separator, SpinButton, Spinner, Stack, WidgetPaintable,
+    Orientation, Overlay, Paned, Popover, ResponseType, ScrolledWindow, SelectionMode, Separator,
+    SpinButton, Spinner, Stack, WidgetPaintable,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -43,8 +43,7 @@ pub fn run() {
 
 fn show_load_window(application: &Application, window_to_destroy: Option<ApplicationWindow>) {
     let settings = AppSettings::load().unwrap_or_default();
-    let default_path = VaultStore::default_path()
-        .unwrap_or_else(|_| PathBuf::from("vault.notp"));
+    let default_path = VaultStore::default_path().unwrap_or_else(|_| PathBuf::from("vault.notp"));
     let initial_path = settings
         .last_vault_path
         .clone()
@@ -208,7 +207,8 @@ fn show_load_window(application: &Application, window_to_destroy: Option<Applica
             return;
         }
 
-        let stored_path = std::fs::canonicalize(&trimmed).unwrap_or_else(|_| PathBuf::from(&trimmed));
+        let stored_path =
+            std::fs::canonicalize(&trimmed).unwrap_or_else(|_| PathBuf::from(&trimmed));
         let new_settings = AppSettings {
             last_vault_path: Some(stored_path),
             ..Default::default()
@@ -225,7 +225,8 @@ fn show_load_window(application: &Application, window_to_destroy: Option<Applica
         spinner_for_response.set_visible(true);
         spinner_for_response.start();
 
-        let (sender, receiver) = std::sync::mpsc::channel::<anyhow::Result<crate::storage::Vault>>();
+        let (sender, receiver) =
+            std::sync::mpsc::channel::<anyhow::Result<crate::storage::Vault>>();
         let path_for_thread = trimmed.clone();
         let password_for_thread = password_text.clone();
         let will_create_for_thread = will_create;
@@ -253,33 +254,33 @@ fn show_load_window(application: &Application, window_to_destroy: Option<Applica
         let spinner_for_poll = spinner_for_response.clone();
         let window_to_destroy_for_poll = window_to_destroy_for_response.clone();
 
-        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-            match receiver.try_recv() {
-                Ok(Ok(vault)) => {
-                    dialog_for_poll.destroy();
-                    window_for_poll.destroy();
-                    if let Some(w) = window_to_destroy_for_poll.as_ref() {
-                        w.destroy();
-                    }
-                    show_main_window(&application_for_poll, vault);
-                    glib::ControlFlow::Break
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || match receiver
+            .try_recv()
+        {
+            Ok(Ok(vault)) => {
+                dialog_for_poll.destroy();
+                window_for_poll.destroy();
+                if let Some(w) = window_to_destroy_for_poll.as_ref() {
+                    w.destroy();
                 }
-                Ok(Err(error)) => {
-                    spinner_for_poll.stop();
-                    spinner_for_poll.set_visible(false);
-                    password_for_poll.set_sensitive(true);
-                    confirmation_for_poll.set_sensitive(true);
-                    cancel_button_for_poll.set_sensitive(true);
-                    action_button_for_poll.set_sensitive(true);
-                    browse_button_for_poll.set_sensitive(true);
-                    password_for_poll.set_text("");
-                    password_for_poll.grab_focus();
-                    error_label_for_poll.set_text(&error.to_string());
-                    glib::ControlFlow::Break
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(_) => glib::ControlFlow::Break,
+                show_main_window(&application_for_poll, vault);
+                glib::ControlFlow::Break
             }
+            Ok(Err(error)) => {
+                spinner_for_poll.stop();
+                spinner_for_poll.set_visible(false);
+                password_for_poll.set_sensitive(true);
+                confirmation_for_poll.set_sensitive(true);
+                cancel_button_for_poll.set_sensitive(true);
+                action_button_for_poll.set_sensitive(true);
+                browse_button_for_poll.set_sensitive(true);
+                password_for_poll.set_text("");
+                password_for_poll.grab_focus();
+                error_label_for_poll.set_text(&error.to_string());
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(_) => glib::ControlFlow::Break,
         });
     });
 
@@ -432,7 +433,8 @@ impl CountdownSpinner {
 
     fn update(&self, fraction: f64, remaining: u64) {
         let mut state = self.state.borrow_mut();
-        let changed = (state.fraction - fraction).abs() > f64::EPSILON || state.remaining != remaining;
+        let changed =
+            (state.fraction - fraction).abs() > f64::EPSILON || state.remaining != remaining;
         state.fraction = fraction;
         state.remaining = remaining;
         if changed {
@@ -1071,12 +1073,10 @@ fn show_main_window(application: &Application, vault: Vault) {
     glib::timeout_add_seconds_local(1, move || {
         if has_been_active_for_timer.get() && !window_for_timer.is_active() {
             let now = Instant::now();
-            let last = last_inactive_for_timer
-                .get()
-                .unwrap_or_else(|| {
-                    last_inactive_for_timer.set(Some(now));
-                    now
-                });
+            let last = last_inactive_for_timer.get().unwrap_or_else(|| {
+                last_inactive_for_timer.set(Some(now));
+                now
+            });
             if now.duration_since(last).as_secs() >= settings_for_timer_clone.get() {
                 lock_action_for_timer();
                 return glib::ControlFlow::Break;
@@ -1403,7 +1403,11 @@ fn show_selected(context: &RenderContext) {
     };
     context.detail.issuer.set_text(&account.issuer);
     context.detail.account.set_text(&account.name);
-    context.detail.metadata.set_text(&format_metadata(account.added_at, account.last_used_at, account.use_count));
+    context.detail.metadata.set_text(&format_metadata(
+        account.added_at,
+        account.last_used_at,
+        account.use_count,
+    ));
     context.detail.stack.set_visible_child_name("content");
     context.detail.copy.set_sensitive(true);
     context.detail.edit.set_sensitive(true);
@@ -1413,7 +1417,10 @@ fn show_selected(context: &RenderContext) {
 fn format_metadata(added_at: u64, last_used_at: Option<u64>, use_count: u64) -> String {
     let mut parts = Vec::new();
     if added_at > 0 {
-        parts.push(format!("Added {}", format_relative(added_at, current_timestamp())));
+        parts.push(format!(
+            "Added {}",
+            format_relative(added_at, current_timestamp())
+        ));
     }
     match last_used_at {
         Some(timestamp) => parts.push(format!(
@@ -1422,7 +1429,11 @@ fn format_metadata(added_at: u64, last_used_at: Option<u64>, use_count: u64) -> 
             use_count,
             if use_count <= 1 { "time" } else { "times" }
         )),
-        None => parts.push(format!("Not used yet — {} use{}", use_count, if use_count <= 1 { "" } else { "s" })),
+        None => parts.push(format!(
+            "Not used yet — {} use{}",
+            use_count,
+            if use_count <= 1 { "" } else { "s" }
+        )),
     }
     parts.join("\n")
 }
@@ -1870,7 +1881,10 @@ fn copy_current_code(context: &RenderContext, window: &ApplicationWindow, target
             copy_to_clipboard(window, &code);
             register_clipboard_auto_clear(window, code.clone());
             let remaining = remaining_seconds(current_timestamp(), period);
-            show_toast(context, &format!("Code copied — expires in {} s", remaining));
+            show_toast(
+                context,
+                &format!("Code copied — expires in {} s", remaining),
+            );
         }
         ClipboardTarget::Secret => {
             copy_to_clipboard(window, &secret);
@@ -2049,18 +2063,27 @@ fn request_delete(context: &RenderContext, window: &ApplicationWindow, id: Uuid)
     let message = format!("Delete the entry « {} » ({}) ?", name, issuer);
     let context_for_confirmation = context.clone();
     let window_for_confirmation = window.clone();
-    confirm(&window_for_confirmation.clone(), "Delete entry", &message, move || {
-        let result = context_for_confirmation
-            .vault
-            .borrow_mut()
-            .remove_account(id);
-        if let Err(error) = result {
-            show_error(&window_for_confirmation, "Unable to save the vault", &error.to_string());
-        } else {
-            context_for_confirmation.selected.set(None);
-            render_accounts(&context_for_confirmation);
-        }
-    });
+    confirm(
+        &window_for_confirmation.clone(),
+        "Delete entry",
+        &message,
+        move || {
+            let result = context_for_confirmation
+                .vault
+                .borrow_mut()
+                .remove_account(id);
+            if let Err(error) = result {
+                show_error(
+                    &window_for_confirmation,
+                    "Unable to save the vault",
+                    &error.to_string(),
+                );
+            } else {
+                context_for_confirmation.selected.set(None);
+                render_accounts(&context_for_confirmation);
+            }
+        },
+    );
 }
 
 fn edit_selected(context: &RenderContext, window: &ApplicationWindow, id: Uuid) {

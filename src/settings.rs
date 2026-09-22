@@ -136,7 +136,9 @@ mod tests {
     }
 
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
@@ -182,10 +184,7 @@ mod tests {
             .unwrap();
             let loaded = AppSettings::load().unwrap();
             assert_eq!(loaded.auto_lock_seconds, MIN_AUTO_LOCK_SECONDS);
-            assert_eq!(
-                loaded.clipboard_clear_seconds,
-                MAX_CLIPBOARD_CLEAR_SECONDS
-            );
+            assert_eq!(loaded.clipboard_clear_seconds, MAX_CLIPBOARD_CLEAR_SECONDS);
             assert_eq!(loaded.theme, Theme::Dark);
         });
     }

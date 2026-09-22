@@ -356,11 +356,7 @@ impl Vault {
         let Some(new_index) = new_index else {
             return Ok(None);
         };
-        if original_order
-            .iter()
-            .position(|candidate| *candidate == id)
-            != Some(new_index)
-        {
+        if original_order.iter().position(|candidate| *candidate == id) != Some(new_index) {
             return Ok(Some(new_index));
         }
         match self.save() {
@@ -493,18 +489,18 @@ impl VaultStore {
         // vault written before phase 2.3. Peek the schema version byte and
         // route to the matching decoder; missing entries in a legacy layout
         // are filled by the per-version migration below.
-        let on_disk_version = peek_varint_u32(&plaintext)
-            .context("Unable to read the vault schema version")?;
+        let on_disk_version =
+            peek_varint_u32(&plaintext).context("Unable to read the vault schema version")?;
         let data: VaultData = match on_disk_version {
             1 => {
-                let v1: VaultDataV1 = match bincode::deserialize(&plaintext)
-                    .context("Unable to decode a v1 vault") {
-                    Ok(v1) => v1,
-                    Err(error) => {
-                        plaintext.zeroize();
-                        return Err(error);
-                    }
-                };
+                let v1: VaultDataV1 =
+                    match bincode::deserialize(&plaintext).context("Unable to decode a v1 vault") {
+                        Ok(v1) => v1,
+                        Err(error) => {
+                            plaintext.zeroize();
+                            return Err(error);
+                        }
+                    };
                 plaintext.zeroize();
                 let mut data: VaultData = v1.into();
                 data.updated_at = current_timestamp();
@@ -512,7 +508,8 @@ impl VaultStore {
             }
             CURRENT_VAULT_VERSION => {
                 let data = match bincode::deserialize(&plaintext)
-                    .context("Vault is incompatible or corrupted") {
+                    .context("Vault is incompatible or corrupted")
+                {
                     Ok(data) => data,
                     Err(error) => {
                         plaintext.zeroize();
@@ -559,12 +556,13 @@ impl VaultStore {
         let mut key_arr = [0_u8; 32];
         key_arr.copy_from_slice(key);
         let (salt, mut plaintext) = crypto::open_v3(&encoded, &key_arr)?;
-        let on_disk_version = peek_varint_u32(&plaintext)
-            .context("Unable to read the vault schema version")?;
+        let on_disk_version =
+            peek_varint_u32(&plaintext).context("Unable to read the vault schema version")?;
         let data: VaultData = match on_disk_version {
             CURRENT_VAULT_VERSION => {
                 let data = match bincode::deserialize(&plaintext)
-                    .context("Vault is incompatible or corrupted") {
+                    .context("Vault is incompatible or corrupted")
+                {
                     Ok(data) => data,
                     Err(error) => {
                         plaintext.zeroize();
@@ -651,12 +649,8 @@ fn backup_previous(path: &Path) -> Result<()> {
         fs::remove_file(&backup_path)
             .with_context(|| format!("Unable to remove {}", backup_path.display()))?;
     }
-    fs::copy(path, &backup_path).with_context(|| {
-        format!(
-            "Unable to write backup {}",
-            backup_path.display()
-        )
-    })?;
+    fs::copy(path, &backup_path)
+        .with_context(|| format!("Unable to write backup {}", backup_path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -945,13 +939,16 @@ mod tests {
         assert_eq!(vault.data().accounts[0].last_used_at, None);
         assert_eq!(vault.data().accounts[0].use_count, 0);
         assert_eq!(
-            vault.data().accounts[0].added_at, 1_700_000_000,
+            vault.data().accounts[0].added_at,
+            1_700_000_000,
             "migrated entries inherit the vault creation timestamp"
         );
 
         // Saving the migrated vault must produce a file that the v2 decoder
         // (and only the v2 decoder) can read back.
-        vault.save().expect("saving the migrated vault must succeed");
+        vault
+            .save()
+            .expect("saving the migrated vault must succeed");
         drop(vault);
 
         let reopened = store.unlock("legacy master phrase").unwrap();
@@ -1086,9 +1083,7 @@ mod tests {
     fn change_password_reencrypts_vault() {
         let directory = tempdir().unwrap();
         let store = VaultStore::from_path(directory.path().join("vault.notp"));
-        let mut vault = store
-            .create("correct horse battery staple")
-            .unwrap();
+        let mut vault = store.create("correct horse battery staple").unwrap();
         let account = Account::new(
             "Example".to_string(),
             "alice@example.com".to_string(),
@@ -1211,18 +1206,9 @@ mod tests {
         let second_id = vault.data_mut().add_account(second).unwrap();
         vault.save().unwrap();
 
-        assert_eq!(
-            vault.reorder_account(first_id, 0).unwrap(),
-            Some(0)
-        );
-        assert_eq!(
-            vault.reorder_account(first_id, 5).unwrap(),
-            Some(1)
-        );
-        assert_eq!(
-            vault.reorder_account(second_id, 0).unwrap(),
-            Some(0)
-        );
+        assert_eq!(vault.reorder_account(first_id, 0).unwrap(), Some(0));
+        assert_eq!(vault.reorder_account(first_id, 5).unwrap(), Some(1));
+        assert_eq!(vault.reorder_account(second_id, 0).unwrap(), Some(0));
 
         let reopened = store.unlock("correct horse battery staple").unwrap();
         let order = reopened

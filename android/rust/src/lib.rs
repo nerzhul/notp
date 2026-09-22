@@ -436,7 +436,10 @@ pub fn recovery_key_to_bytes(words: String) -> Result<Vec<u8>, VaultError> {
 pub fn recovery_key_from_bytes(bytes: Vec<u8>) -> Result<String, VaultError> {
     if bytes.len() != 32 {
         return Err(VaultError::Other {
-            message: format!("Recovery key material must be 32 bytes, got {}", bytes.len()),
+            message: format!(
+                "Recovery key material must be 32 bytes, got {}",
+                bytes.len()
+            ),
         });
     }
     let mut key = [0_u8; 32];
@@ -554,11 +557,7 @@ mod recovery_key_internal {
     pub fn format(bytes: &[u8; 32]) -> String {
         let encoded = base32_encode(bytes);
         let mut grouped = String::with_capacity(encoded.len() + encoded.len() / GROUP_SIZE);
-        for (index, chunk) in encoded
-            .as_bytes()
-            .chunks(GROUP_SIZE)
-            .enumerate()
-        {
+        for (index, chunk) in encoded.as_bytes().chunks(GROUP_SIZE).enumerate() {
             if index > 0 {
                 grouped.push('-');
             }

@@ -155,7 +155,8 @@ fn parse_migration(url: &url::Url) -> Result<Vec<OtpParams>> {
     if data.is_empty() {
         bail!("The data parameter in the otpauth-migration URI is empty");
     }
-    let bytes = decode_migration_data(&data).context("Unable to base64-decode the otpauth-migration payload")?;
+    let bytes = decode_migration_data(&data)
+        .context("Unable to base64-decode the otpauth-migration payload")?;
     let payload = parse_migration_payload(&bytes)
         .context("Unable to parse the otpauth-migration protobuf payload")?;
     if payload.is_empty() {
@@ -184,7 +185,9 @@ enum MigrationSkip {
     Other(anyhow::Error),
 }
 
-fn migration_parameter_to_params(parameter: MigrationOtpParameter) -> Result<OtpParams, MigrationSkip> {
+fn migration_parameter_to_params(
+    parameter: MigrationOtpParameter,
+) -> Result<OtpParams, MigrationSkip> {
     if parameter.otp_type != 2 {
         return Err(MigrationSkip::UnsupportedType);
     }
@@ -239,12 +242,8 @@ fn decode_label(encoded: &str) -> String {
 
 fn decode_migration_data(data: &str) -> Result<Vec<u8>> {
     let trimmed = data.trim().trim_end_matches('=');
-    let candidates: [base64::engine::GeneralPurpose; 4] = [
-        URL_SAFE_NO_PAD,
-        URL_SAFE,
-        STANDARD_NO_PAD,
-        STANDARD,
-    ];
+    let candidates: [base64::engine::GeneralPurpose; 4] =
+        [URL_SAFE_NO_PAD, URL_SAFE, STANDARD_NO_PAD, STANDARD];
     let mut last_err: Option<base64::DecodeError> = None;
     for engine in &candidates {
         match engine.decode(trimmed.as_bytes()) {
@@ -275,7 +274,8 @@ fn parse_migration_payload(data: &[u8]) -> Result<Vec<MigrationOtpParameter>> {
         let field = tag >> 3;
         let wire_type = tag & 7;
         if field == 1 && wire_type == 2 {
-            let length = read_varint(data, &mut pos).context("Truncated migration payload")? as usize;
+            let length =
+                read_varint(data, &mut pos).context("Truncated migration payload")? as usize;
             if pos + length > data.len() {
                 bail!("Truncated migration payload");
             }

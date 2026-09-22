@@ -83,9 +83,7 @@ fn main() -> anyhow::Result<()> {
         | Some(Command::Import { .. })
         | Some(Command::ChangePassword)
         | Some(Command::GenQr { .. }) => {
-            eprintln!(
-                "notp-cli: subcommand recognised but not yet implemented (phase 1.2)."
-            );
+            eprintln!("notp-cli: subcommand recognised but not yet implemented (phase 1.2).");
             std::process::exit(1);
         }
     }
