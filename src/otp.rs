@@ -98,7 +98,7 @@ pub fn normalize_secret(input: &str) -> Result<String> {
 
 pub fn encode_base32(input: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut output = String::with_capacity(((input.len() + 4) / 5) * 8);
+    let mut output = String::with_capacity(input.len().div_ceil(5) * 8);
     let mut buffer: u32 = 0;
     let mut bits: u32 = 0;
     for byte in input {

@@ -238,14 +238,9 @@ impl VaultData {
         }
         let account = self.accounts.remove(current);
         let target = new_position.min(self.accounts.len());
-        let adjusted = if new_position > current {
-            target
-        } else {
-            target
-        };
-        self.accounts.insert(adjusted, account);
+        self.accounts.insert(target, account);
         self.updated_at = current_timestamp();
-        Some(adjusted)
+        Some(target)
     }
 
     #[cfg(feature = "gtk")]
@@ -364,7 +359,7 @@ impl Vault {
         if original_order
             .iter()
             .position(|candidate| *candidate == id)
-            .map_or(false, |current| current == new_index)
+            != Some(new_index)
         {
             return Ok(Some(new_index));
         }
@@ -620,6 +615,7 @@ impl VaultLock {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)
             .with_context(|| format!("Unable to open {}", path.display()))?;
         let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };

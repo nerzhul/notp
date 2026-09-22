@@ -27,7 +27,7 @@ const APPLICATION_ID: &str = "com.nerzhul.notp";
 pub fn run() {
     gtk::init().expect("Unable to initialize GTK");
     load_app_css();
-    if let Some(settings) = AppSettings::load().ok() {
+    if let Ok(settings) = AppSettings::load() {
         apply_theme(&settings.theme);
     }
     let application = Application::builder()
@@ -199,11 +199,9 @@ fn show_load_window(application: &Application, window_to_destroy: Option<Applica
         let password_text = password_for_response.text().to_string();
         let confirmation_text = confirmation_for_response.text().to_string();
         let will_create = !std::path::Path::new(&trimmed).is_file();
-        if will_create {
-            if password_text != confirmation_text {
-                error_label_for_response.set_text("Passwords do not match");
-                return;
-            }
+        if will_create && password_text != confirmation_text {
+            error_label_for_response.set_text("Passwords do not match");
+            return;
         }
         if password_text.is_empty() {
             error_label_for_response.set_text("Master password is required");
@@ -211,8 +209,10 @@ fn show_load_window(application: &Application, window_to_destroy: Option<Applica
         }
 
         let stored_path = std::fs::canonicalize(&trimmed).unwrap_or_else(|_| PathBuf::from(&trimmed));
-        let mut new_settings = AppSettings::default();
-        new_settings.last_vault_path = Some(stored_path);
+        let new_settings = AppSettings {
+            last_vault_path: Some(stored_path),
+            ..Default::default()
+        };
         let _ = new_settings.save();
 
         path_entry_for_response.set_sensitive(false);
@@ -1355,7 +1355,7 @@ fn render_accounts(context: &RenderContext) {
         row_box.append(&title_box);
         row_box.append(&code_label);
         row.set_child(Some(&row_box));
-        attach_drag_handlers(&context, &row, id);
+        attach_drag_handlers(context, &row, id);
         context.list_box.append(&row);
         context.row_labels.borrow_mut().insert(id, code_label);
         if first_id.is_none() {
@@ -1364,7 +1364,7 @@ fn render_accounts(context: &RenderContext) {
     }
 
     let selected = selected
-        .filter(|_| context.list_box.row_at_index(0).map_or(false, |_| true))
+        .filter(|_| context.list_box.row_at_index(0).is_some_and(|_| true))
         .or(first_id);
     context.selected.set(selected);
     if let Some(id) = selected {

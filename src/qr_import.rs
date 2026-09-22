@@ -530,7 +530,7 @@ mod tests {
     }
 
     fn write_varint_field(out: &mut Vec<u8>, field: u32, value: u64) {
-        out.push(((field << 3) | 0) as u8);
+        out.push((field << 3) as u8);
         write_varint(out, value);
     }
 

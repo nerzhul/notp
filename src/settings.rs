@@ -12,18 +12,13 @@ pub const MAX_AUTO_LOCK_SECONDS: u64 = 3_600;
 pub const MIN_CLIPBOARD_CLEAR_SECONDS: u64 = 0;
 pub const MAX_CLIPBOARD_CLEAR_SECONDS: u64 = 600;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
+    #[default]
     System,
     Light,
     Dark,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Self::System
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -141,10 +136,7 @@ mod tests {
     }
 
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|poisoned| {
-            let guard = poisoned.into_inner();
-            guard
-        })
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
