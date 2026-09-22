@@ -86,13 +86,13 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p release/${{ needs.resolve-tag.outputs.version }}
-          cd release/${{ needs.resolve-tag.outputs.version }}
           for bin in ${{ env.BINARIES }}; do
-            cp "${{ github.workspace }}/target/${{ matrix.target }}/release/$bin" "$bin-${{ matrix.target }}"
-            chmod +x "$bin-${{ matrix.target }}"
+            cp "target/${{ matrix.target }}/release/$bin" \
+               "release/${{ needs.resolve-tag.outputs.version }}/$bin-${{ matrix.target }}"
+            chmod +x "release/${{ needs.resolve-tag.outputs.version }}/$bin-${{ matrix.target }}"
           done
-          tar -C release/${{ needs.resolve-tag.outputs.version }} \
-            -czf release/${{ env.BINARY }}-${{ needs.resolve-tag.outputs.version }}-${{ matrix.target }}.tar.gz \
+          tar -C "release/${{ needs.resolve-tag.outputs.version }}" \
+            -czf "release/${{ env.BINARY }}-${{ needs.resolve-tag.outputs.version }}-${{ matrix.target }}.tar.gz" \
             notp-gui-${{ matrix.target }} notp-cli-${{ matrix.target }} ${{ env.BINARY }}.desktop
 
       - name: Upload release artifact
