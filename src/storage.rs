@@ -796,7 +796,7 @@ mod tests {
         v3[..5].copy_from_slice(VAULT_MAGIC_V3);
         assert_eq!(peek_envelope(&v3), Some(EnvelopeFormat::V3));
         assert_eq!(peek_envelope(&[]), None);
-        let short = [b'N', b'O', b'T'];
+        let short = *b"NOT";
         assert_eq!(peek_envelope(&short), None);
         let mut unknown = vec![0_u8; 32];
         unknown[..5].copy_from_slice(b"OTHER");
