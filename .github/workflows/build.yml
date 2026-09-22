@@ -54,18 +54,18 @@ jobs:
       - name: Build (release)
         run: cargo build --release --verbose --locked --target ${{ matrix.target }}
 
-      - name: Upload debug binary
+      - name: Upload debug binaries
         uses: actions/upload-artifact@v4
         with:
           name: notp-debug-${{ matrix.target }}
-          path: target/${{ matrix.target }}/debug/notp
+          path: target/${{ matrix.target }}/debug/notp-*
           if-no-files-found: error
           retention-days: 7
 
-      - name: Upload release binary
+      - name: Upload release binaries
         uses: actions/upload-artifact@v4
         with:
           name: notp-release-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/notp
+          path: target/${{ matrix.target }}/release/notp-*
           if-no-files-found: error
           retention-days: 7
