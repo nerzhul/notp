@@ -191,9 +191,11 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(needs.resolve-tag.outputs.version, '-') }}
+          # files: |
+          #   artifacts/**/*.tar.gz
+          #   artifacts/**/*.apk
           files: |
             artifacts/**/*.tar.gz
-            artifacts/**/*.apk
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
