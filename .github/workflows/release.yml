@@ -85,13 +85,14 @@ jobs:
       - name: Stage artifacts
         working-directory: ${{ github.workspace }}
         run: |
-          mkdir -p release/${{ needs.resolve-tag.outputs.version }}
+          STAGE="release/${{ needs.resolve-tag.outputs.version }}"
+          mkdir -p "$STAGE"
           for bin in ${{ env.BINARIES }}; do
-            cp "target/${{ matrix.target }}/release/$bin" \
-               "release/${{ needs.resolve-tag.outputs.version }}/$bin-${{ matrix.target }}"
-            chmod +x "release/${{ needs.resolve-tag.outputs.version }}/$bin-${{ matrix.target }}"
+            cp "target/${{ matrix.target }}/release/$bin" "$STAGE/$bin-${{ matrix.target }}"
+            chmod +x "$STAGE/$bin-${{ matrix.target }}"
           done
-          tar -C "release/${{ needs.resolve-tag.outputs.version }}" \
+          cp "${{ env.BINARY }}.desktop" "$STAGE/${{ env.BINARY }}.desktop"
+          tar -C "$STAGE" \
             -czf "release/${{ env.BINARY }}-${{ needs.resolve-tag.outputs.version }}-${{ matrix.target }}.tar.gz" \
             notp-gui-${{ matrix.target }} notp-cli-${{ matrix.target }} ${{ env.BINARY }}.desktop
 
