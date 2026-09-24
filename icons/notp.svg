@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="notp">
+  <title>notp</title>
+  <!-- Shield body -->
+  <path d="M32 3 L7 14 L7 31 C7 48 32 61 32 61 C32 61 57 48 57 31 L57 14 Z"
+        fill="#1f6feb" stroke="#0b3d91" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Inner highlight -->
+  <path d="M32 8 L12 17 L12 31 C12 44.5 32 55.5 32 55.5 C32 55.5 52 44.5 52 31 L52 17 Z"
+        fill="none" stroke="#9ec5ff" stroke-width="1" stroke-opacity="0.5"/>
+  <!-- Clock face -->
+  <circle cx="32" cy="32" r="15" fill="#ffffff"/>
+  <circle cx="32" cy="32" r="15" fill="none" stroke="#0b3d91" stroke-width="1.5"/>
+  <!-- Tick marks -->
+  <rect x="31.25" y="18.5" width="1.5" height="3" fill="#0b3d91"/>
+  <rect x="31.25" y="42.5" width="1.5" height="3" fill="#0b3d91"/>
+  <rect x="18.5" y="31.25" width="3" height="1.5" fill="#0b3d91"/>
+  <rect x="42.5" y="31.25" width="3" height="1.5" fill="#0b3d91"/>
+  <!-- Hands -->
+  <line x1="32" y1="32" x2="32" y2="22" stroke="#0b3d91" stroke-width="2" stroke-linecap="round"/>
+  <line x1="32" y1="32" x2="39" y2="36" stroke="#1f6feb" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="32" cy="32" r="1.8" fill="#0b3d91"/>
+</svg>

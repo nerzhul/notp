@@ -18,6 +18,13 @@ BUILD_DIR := target
 RELEASE_BIN := $(BUILD_DIR)/release
 DEBUG_BIN := $(BUILD_DIR)/debug
 
+# Icon: source SVG under icons/, plus raster sizes rendered at install time.
+ICON_NAME := notp
+ICON_SVG := icons/$(ICON_NAME).svg
+# Sizes follow the freedesktop hicolor convention; SVG fallback lives in
+# scalable/apps so older themes still find something.
+ICON_SIZES := 48 64 128 256
+
 INSTALL_BIN := $(patsubst %,$(DESTDIR)$(BINDIR)/%,$(BINARIES))
 INSTALL_DESKTOP := $(DESTDIR)$(APPLICATIONSDIR)/notp.desktop
 
@@ -33,7 +40,8 @@ ANDROID_API ?= 26
 
 .PHONY: all build build-release release debug clean install uninstall \
         test test-android rust-test rust-build \
-        android-build android-release android-clean android-install android-uninstall
+        android-build android-release android-clean android-install android-uninstall \
+        install-icons
 
 all: build
 
@@ -105,13 +113,35 @@ clean:
 	$(CARGO) clean
 
 install: build-release
-	$(foreach bin,$(BINARIES),$(call install_bin,$(bin)))
-	install -Dm0644 notp.desktop $(INSTALL_DESKTOP)
+	$(foreach bin,$(BINARIES),$(call install_bin,$(bin));)
+	sudo install -Dm0644 notp.desktop $(INSTALL_DESKTOP)
+	$(MAKE) install-icons
+	sudo update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null || true
+	sudo gtk-update-icon-cache -f -t $(DESTDIR)$(ICONDIR) 2>/dev/null || true
 
 uninstall:
 	$(foreach bin,$(BINARIES),rm -f $(DESTDIR)$(BINDIR)/$(bin))
 	rm -f $(INSTALL_DESKTOP)
+	$(foreach sz,$(ICON_SIZES),rm -f $(DESTDIR)$(ICONDIR)/$(sz)x$(sz)/apps/$(ICON_NAME).png)
+	rm -f $(DESTDIR)$(ICONDIR)/scalable/apps/$(ICON_NAME).svg
+	sudo gtk-update-icon-cache -f -t $(DESTDIR)$(ICONDIR) 2>/dev/null || true
+
+# Install the icon at every size we ship, rendering PNGs from the SVG when
+# rsvg-convert is available. Falls back to the SVG-only install on systems
+# without a converter so installation never fails because of missing tooling.
+install-icons:
+	sudo install -Dm0644 $(ICON_SVG) $(DESTDIR)$(ICONDIR)/scalable/apps/$(ICON_NAME).svg
+	@tmp=$$(mktemp); trap "rm -f $$tmp" EXIT; \
+	for sz in $(ICON_SIZES); do \
+		dir=$(DESTDIR)$(ICONDIR)/$${sz}x$${sz}/apps; \
+		if command -v rsvg-convert >/dev/null 2>&1; then \
+			rsvg-convert -w $$sz -h $$sz $(ICON_SVG) -o $$tmp; \
+			sudo install -Dm 0644 $$tmp $$dir/$(ICON_NAME).png; \
+		else \
+			sudo install -Dm0644 $(ICON_SVG) $$dir/$(ICON_NAME).svg; \
+		fi; \
+	done
 
 define install_bin
-	install -Dm0755 $(RELEASE_BIN)/$(1) $(DESTDIR)$(BINDIR)/$(1)
+	sudo install -Dm0755 $(RELEASE_BIN)/$(1) $(DESTDIR)$(BINDIR)/$(1)
 endef
